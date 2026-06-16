@@ -15,7 +15,7 @@ path = "./src/bin/pgrx_embed.rs"
 
 
 [features]
-default = ["pg16"]
+default = ["pg17"]
 pg13 = ["pgrx/pg13", "pgrx-tests/pg13" ]
 pg14 = ["pgrx/pg14", "pgrx-tests/pg14" ]
 pg15 = ["pgrx/pg15", "pgrx-tests/pg15" ]
@@ -25,11 +25,11 @@ pg_test = ["tempfile", "sqllogictest"]
 
 [dependencies]
 pgrx = "=0.14.3"
-lance_rs = { package = "lance", version = "1.0" }
-lance-namespace = "1.0"
-lance-namespace-impls = { version = "1.0", features = ["rest"] }
-arrow = "56.2"
-arrow-schema = "56.2"
+lance_rs = { package = "lance", version = "7.0.0" }
+lance-namespace = "7.0.0"
+lance-namespace-impls = { version = "7.0.0", features = ["rest"] }
+arrow = "58.0.0"
+arrow-schema = "58.0.0"
 tokio = { version = "1.0", features = ["rt-multi-thread", "macros"] }
 futures = "0.3"
 serde = { version = "1.0", features = ["derive"] }

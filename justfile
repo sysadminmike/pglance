@@ -1,7 +1,7 @@
 # lance extension development commands
 
 # Default PostgreSQL version
-pg_version := "16"
+pg_version := "17"
 pgrx_version := "0.14.3"
 
 # Show available commands
@@ -35,6 +35,10 @@ fmt:
 # Run all tests (unit + integration)
 test pg=pg_version: ensure-pgrx
     cargo test --no-default-features --features pg{{pg}}
+
+# Run external optimize/vacuum filesystem e2e test against the current PG connection.
+e2e-admin:
+    bash tests/e2e_admin_maintenance.sh
 
 # Build extension
 build pg=pg_version: ensure-pgrx

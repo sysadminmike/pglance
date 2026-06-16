@@ -14,7 +14,7 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   PGRX_VERSION: 0.14.3
-  PG_VERSION: 16
+  PG_VERSION: 17
 
 jobs:
   rust-formatting:
@@ -57,9 +57,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target/
-          key: ${{ runner.os }}-cargo-clippy-pg16-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-clippy-pg17-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-clippy-pg16-
+            ${{ runner.os }}-cargo-clippy-pg17-
             ${{ runner.os }}-cargo-clippy-
 
       - name: Cache cargo-pgrx installation
@@ -92,7 +92,7 @@ jobs:
           cargo pgrx info pg-config ${PG_VERSION} >/dev/null 2>&1 || cargo pgrx init --pg${PG_VERSION}=download
 
       - name: Run Clippy
-        run: cargo clippy --all-targets --no-default-features --features pg16 -- -D warnings
+        run: cargo clippy --all-targets --no-default-features --features pg17 -- -D warnings
 
   rust-tests:
     name: Rust Tests
@@ -130,9 +130,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target/
-          key: ${{ runner.os }}-cargo-test-pg16-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-test-pg17-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-test-pg16-
+            ${{ runner.os }}-cargo-test-pg17-
             ${{ runner.os }}-cargo-test-
 
       - name: Cache cargo-pgrx installation
@@ -165,4 +165,4 @@ jobs:
           cargo pgrx info pg-config ${PG_VERSION} >/dev/null 2>&1 || cargo pgrx init --pg${PG_VERSION}=download
 
       - name: Run Rust tests
-        run: cargo test --no-default-features --features pg16
+        run: cargo test --no-default-features --features pg17

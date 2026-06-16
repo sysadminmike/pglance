@@ -1,0 +1,109 @@
+# Test Lance admin maintenance helpers: optimize and vacuum.
+
+# Create a dataset with several versions/fragments through repeated appends.
+
+query II
+SELECT rows_written, (duration_ms >= 0) AS ok
+  FROM lance_append(
+    '${LANCE_WRITE_DIR}/t_admin_maintenance.lance',
+    'SELECT v::int4 AS id, ''row_'' || v::text AS label FROM generate_series(1,3) v',
+    mode := 'create'
+  );
+----
+3 t
+
+query II
+SELECT rows_written, (duration_ms >= 0) AS ok
+  FROM lance_append(
+    '${LANCE_WRITE_DIR}/t_admin_maintenance.lance',
+    'SELECT v::int4 AS id, ''row_'' || v::text AS label FROM generate_series(4,6) v'
+  );
+----
+3 t
+
+query II
+SELECT rows_written, (duration_ms >= 0) AS ok
+  FROM lance_append(
+    '${LANCE_WRITE_DIR}/t_admin_maintenance.lance',
+    'SELECT v::int4 AS id, ''row_'' || v::text AS label FROM generate_series(7,9) v'
+  );
+----
+3 t
+
+# Optimize should succeed and report non-negative compaction metrics.
+
+query IIIII
+SELECT (fragments_removed >= 0) AS fr_ok,
+       (fragments_added >= 0) AS fa_ok,
+       (files_removed >= 0) AS files_removed_ok,
+       (files_added >= 0) AS files_added_ok,
+       (duration_ms >= 0) AS time_ok
+  FROM lance_optimize(
+    '${LANCE_WRITE_DIR}/t_admin_maintenance.lance',
+    target_rows_per_fragment := 1000000,
+    compaction_mode := 'reencode'
+  );
+----
+t t t t t
+
+# Read-back still sees the same rows after compaction.
+
+statement ok
+SELECT lance_import('${SERVER}', '${SCHEMA}', 't_admin_maintenance', '${LANCE_WRITE_DIR}/t_admin_maintenance.lance', batch_size => NULL);
+
+query I
+SELECT count(*) FROM t_admin_maintenance;
+----
+9
+
+query I
+SELECT sum(id) FROM t_admin_maintenance;
+----
+45
+
+# Vacuum old versions should succeed and report non-negative removal stats.
+
+query IIIIIII
+SELECT (bytes_removed >= 0) AS bytes_ok,
+       (old_versions >= 0) AS versions_ok,
+       (data_files_removed >= 0) AS data_ok,
+       (transaction_files_removed >= 0) AS tx_ok,
+       (index_files_removed >= 0) AS index_ok,
+       (deletion_files_removed >= 0) AS deletion_ok,
+       (duration_ms >= 0) AS time_ok
+  FROM lance_vacuum(
+    '${LANCE_WRITE_DIR}/t_admin_maintenance.lance',
+    older_than_seconds := 0,
+    error_if_tagged_old_versions := false
+  );
+----
+t t t t t t t
+
+# Error paths for bad admin arguments.
+
+statement ok
+CREATE OR REPLACE FUNCTION capture_error(sql text)
+RETURNS jsonb
+LANGUAGE plpgsql AS $$
+DECLARE st text; msg text; det text;
+BEGIN
+  EXECUTE sql;
+  RETURN NULL;
+EXCEPTION WHEN OTHERS THEN
+  GET STACKED DIAGNOSTICS st = RETURNED_SQLSTATE, msg = MESSAGE_TEXT, det = PG_EXCEPTION_DETAIL;
+  RETURN jsonb_build_object('sqlstate', st, 'message', msg, 'detail', det);
+END $$;
+
+query T
+SELECT capture_error(
+  'SELECT * FROM lance_optimize(''' || '${LANCE_WRITE_DIR}/t_admin_maintenance.lance' || ''', compaction_mode := ''bad'')'
+) IS NOT NULL;
+----
+t
+
+query T
+SELECT capture_error(
+  'SELECT * FROM lance_vacuum(''' || '${LANCE_WRITE_DIR}/t_admin_maintenance.lance' || ''', older_than_seconds := -1)'
+) IS NOT NULL;
+----
+t

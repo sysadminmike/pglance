@@ -14,14 +14,14 @@ This repository contains `pglance`, a Rust crate that builds a PostgreSQL extens
 - Crate/package name: `pglance`
 - PostgreSQL extension name: `lance` (use `CREATE EXTENSION lance;`)
 - Pinned pgrx version: `0.14.3` (keep `cargo-pgrx` aligned)
-- Default PostgreSQL feature: `pg16` (see `Cargo.toml`)
+- Default PostgreSQL feature: `pg17` (see `Cargo.toml`)
 
 ## Common Commands
 
 Use `justfile` targets whenever possible:
 
 - `just ci`  
-  Runs `cargo fmt --check`, `cargo clippy -D warnings`, and `cargo test` (with `pg16`).
+  Runs `cargo fmt --check`, `cargo clippy -D warnings`, and `cargo test` (with `pg17`).
 - `just run`  
   Installs the extension and starts a pgrx-managed Postgres instance, then reloads the extension.
 - `just reload-ext`  
@@ -29,7 +29,7 @@ Use `justfile` targets whenever possible:
 
 If `pgrx` is not initialized yet:
 
-- `cargo pgrx init --pg16=download`
+- `cargo pgrx init --pg17=download`
 
 ## Development Guardrails
 
