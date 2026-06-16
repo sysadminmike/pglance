@@ -230,3 +230,75 @@ SELECT capture_error(
 ) IS NOT NULL;
 ----
 t
+
+# ── Chunked merge: force the streaming path with a tiny lance.write_chunk_rows ──
+# With a chunk size of 7 a 50-row source streams through ~8 SPI cursor chunks,
+# each applied as its own Lance merge commit. This verifies that chunked merges
+# (a) thread the updated dataset between chunks, (b) apply both updates and
+# inserts correctly, and (c) do not produce duplicate keys despite per-chunk
+# commits.
+
+statement ok
+SET lance.write_chunk_rows = 7;
+
+# Base dataset: ids 1..50
+query II
+SELECT rows_written, (duration_ms >= 0) AS ok
+  FROM lance_append(
+    '${LANCE_WRITE_DIR}/t_merge_chunked.lance',
+    'SELECT v::int4 AS id, ''base_'' || v::text AS name FROM generate_series(1,50) v',
+    mode := 'create'
+  );
+----
+50 t
+
+# Merge source: ids 26..75 — 25 updates (26..50) + 25 inserts (51..75)
+query IIII
+SELECT rows_merged, rows_inserted IS NULL AS ins_null, rows_updated IS NULL AS upd_null, (duration_ms >= 0) AS time_ok
+  FROM lance_merge_insert(
+    '${LANCE_WRITE_DIR}/t_merge_chunked.lance',
+    'SELECT v::int4 AS id, ''merged_'' || v::text AS name FROM generate_series(26,75) v',
+    ARRAY['id'],
+    when_matched := 'update',
+    when_not_matched := 'insert'
+  );
+----
+50 t t t
+
+statement ok
+SELECT lance_import('${SERVER}', '${SCHEMA}', 't_merge_chunked', '${LANCE_WRITE_DIR}/t_merge_chunked.lance', batch_size => NULL);
+
+# Total should be 75 rows: 1..50 base, 51..75 inserted, 26..50 updated in place.
+query I
+SELECT count(*) FROM t_merge_chunked;
+----
+75
+
+# Rows 1..25 untouched
+query T
+SELECT name FROM t_merge_chunked WHERE id = 10;
+----
+base_10
+
+# Rows 26..50 updated by the merge
+query T
+SELECT name FROM t_merge_chunked WHERE id = 40;
+----
+merged_40
+
+# Rows 51..75 inserted by the merge
+query T
+SELECT name FROM t_merge_chunked WHERE id = 70;
+----
+merged_70
+
+# No duplicate keys despite per-chunk commits
+query I
+SELECT count(*) FROM (
+  SELECT id FROM t_merge_chunked GROUP BY id HAVING count(*) > 1
+) dups;
+----
+0
+
+statement ok
+RESET lance.write_chunk_rows;

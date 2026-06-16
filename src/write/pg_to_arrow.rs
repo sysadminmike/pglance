@@ -1,10 +1,12 @@
 use arrow::array::{
-    BinaryBuilder, BooleanBuilder, Date32Builder, Float32Builder, Float64Builder, Int16Builder,
-    Int32Builder, Int64Builder, RecordBatch, StringBuilder, TimestampMicrosecondBuilder,
+    Array, BinaryBuilder, BooleanBuilder, Date32Builder, Float32Builder, Float64Builder,
+    Int16Builder, Int32Builder, Int64Builder, RecordBatch, StringBuilder,
+    TimestampMicrosecondBuilder,
 };
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use pgrx::datum::{Date, Timestamp, TimestampWithTimeZone};
 use pgrx::pg_sys;
+use std::os::raw::c_long;
 use std::sync::Arc;
 
 /// Epoch difference: Unix epoch (1970-01-01) to PostgreSQL epoch (2000-01-01) in seconds.
@@ -21,6 +23,7 @@ pub fn pg_oid_to_arrow_type(oid: pg_sys::Oid) -> Result<DataType, String> {
         pg_sys::FLOAT8OID => Ok(DataType::Float64),
         pg_sys::NUMERICOID => Ok(DataType::Utf8), // numeric → string representation for Lance
         pg_sys::TEXTOID | pg_sys::VARCHAROID => Ok(DataType::Utf8),
+        pg_sys::UUIDOID => Ok(DataType::Utf8),
         pg_sys::BYTEAOID => Ok(DataType::Binary),
         pg_sys::DATEOID => Ok(DataType::Date32),
         pg_sys::TIMESTAMPOID => Ok(DataType::Timestamp(TimeUnit::Microsecond, None)),
@@ -28,7 +31,7 @@ pub fn pg_oid_to_arrow_type(oid: pg_sys::Oid) -> Result<DataType, String> {
             TimeUnit::Microsecond,
             Some("UTC".into()),
         )),
-        pg_sys::JSONBOID => Ok(DataType::Utf8),
+        pg_sys::JSONBOID | pg_sys::JSONOID => Ok(DataType::Utf8),
         _ => {
             let type_name = unsafe {
                 let ptr = pg_sys::format_type_be(oid);
@@ -210,7 +213,7 @@ unsafe fn append_datum(
             Err(_) => b.append_null(),
         },
         TypedBuilder::Utf8(b) => {
-            // Handle text, varchar, numeric (as string), and jsonb (as string)
+            // Handle text, varchar, numeric (as string), json/jsonb (as string)
             match pg_oid {
                 pg_sys::NUMERICOID => match heap_tuple.get_datum_by_ordinal(col_index + 1) {
                     Ok(val) => match val.value::<pgrx::AnyNumeric>() {
@@ -225,6 +228,24 @@ unsafe fn append_datum(
                         Ok(Some(v)) => {
                             b.append_value(serde_json::to_string(&v.0).unwrap_or_default())
                         }
+                        Ok(None) => b.append_null(),
+                        Err(_) => b.append_null(),
+                    },
+                    Err(_) => b.append_null(),
+                },
+                pg_sys::JSONOID => match heap_tuple.get_datum_by_ordinal(col_index + 1) {
+                    Ok(val) => match val.value::<pgrx::Json>() {
+                        Ok(Some(v)) => {
+                            b.append_value(serde_json::to_string(&v.0).unwrap_or_default())
+                        }
+                        Ok(None) => b.append_null(),
+                        Err(_) => b.append_null(),
+                    },
+                    Err(_) => b.append_null(),
+                },
+                pg_sys::UUIDOID => match heap_tuple.get_datum_by_ordinal(col_index + 1) {
+                    Ok(val) => match val.value::<pgrx::Uuid>() {
+                        Ok(Some(v)) => b.append_value(v.to_string()),
                         Ok(None) => b.append_null(),
                         Err(_) => b.append_null(),
                     },
@@ -298,78 +319,136 @@ unsafe fn append_datum(
     Ok(())
 }
 
-/// Convert an SPI result set into Arrow RecordBatches.
+/// Convert an already-fetched SPI tuple table into Arrow RecordBatches.
 ///
-/// Executes the given `source_query` via SPI and converts rows into RecordBatches,
-/// yielding one batch per `batch_size` rows.
+/// `cols`/`schema` are computed once by the caller and reused across chunks so
+/// that the column metadata is only derived from the first fetch.
 ///
-/// Returns `(schema, batches, total_row_count)`.
-pub fn spi_to_arrow_batches(
+/// Returns `(batches, row_count)` for the rows in this tuple table. The
+/// `lance.max_write_buffer_mb` guard is enforced per chunk to avoid runaway
+/// memory growth.
+fn convert_spi_rows(
+    tuptable: pgrx::spi::SpiTupleTable,
+    cols: &[SpiColumnInfo],
+    schema: &Arc<Schema>,
+    batch_size: usize,
+) -> Result<(Vec<RecordBatch>, u64), String> {
+    let max_buffer_bytes = crate::max_write_buffer_bytes();
+    let mut buffered_bytes: usize = 0;
+    let mut batches = Vec::new();
+    let mut total_rows: u64 = 0;
+
+    let mut builders: Vec<TypedBuilder> = cols
+        .iter()
+        .map(|c| TypedBuilder::new(&c.arrow_type))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut rows_in_batch: usize = 0;
+
+    for row in tuptable {
+        for (col_idx, col) in cols.iter().enumerate() {
+            unsafe {
+                append_datum(&mut builders[col_idx], &row, col_idx, col.pg_oid)?;
+            }
+        }
+        rows_in_batch += 1;
+        total_rows += 1;
+
+        if rows_in_batch >= batch_size {
+            let arrays: Vec<Arc<dyn Array>> =
+                builders.iter_mut().map(|b| b.finish()).collect();
+            let batch = RecordBatch::try_new(schema.clone(), arrays)
+                .map_err(|e| format!("failed to create RecordBatch: {}", e))?;
+            buffered_bytes += batch
+                .columns()
+                .iter()
+                .map(|a| a.get_array_memory_size())
+                .sum::<usize>();
+            batches.push(batch);
+
+            if max_buffer_bytes > 0 && buffered_bytes > max_buffer_bytes {
+                return Err(format!(
+                    "source chunk exceeds lance.max_write_buffer_mb limit ({} MB): buffered \
+                     ~{} MB before completing. Aborting to avoid an out-of-memory crash. Lower \
+                     lance.write_chunk_rows, or raise lance.max_write_buffer_mb \
+                     (e.g. SET lance.max_write_buffer_mb = ...).",
+                    max_buffer_bytes / (1024 * 1024),
+                    buffered_bytes / (1024 * 1024),
+                ));
+            }
+
+            // Reset builders for the next batch.
+            builders = cols
+                .iter()
+                .map(|c| TypedBuilder::new(&c.arrow_type))
+                .collect::<Result<Vec<_>, _>>()?;
+            rows_in_batch = 0;
+        }
+    }
+
+    // Flush remaining rows.
+    if rows_in_batch > 0 {
+        let arrays: Vec<Arc<dyn Array>> = builders.iter_mut().map(|b| b.finish()).collect();
+        let batch = RecordBatch::try_new(schema.clone(), arrays)
+            .map_err(|e| format!("failed to create RecordBatch: {}", e))?;
+        batches.push(batch);
+    }
+
+    Ok((batches, total_rows))
+}
+
+/// Stream `source_query` through a server-side SPI cursor, invoking `handle`
+/// with each chunk of Arrow batches.
+///
+/// Memory is bounded to roughly `chunk_rows` source rows at a time (plus the
+/// Arrow copy of that chunk), instead of materializing the entire result set.
+/// When `chunk_rows == 0` the whole result set is fetched as a single chunk
+/// (legacy behavior), still bounded by the `lance.max_write_buffer_mb` guard.
+///
+/// Returns the total number of source rows processed.
+pub fn for_each_spi_chunk<F>(
     source_query: &str,
     batch_size: usize,
-) -> Result<(Arc<Schema>, Vec<RecordBatch>, u64), String> {
+    chunk_rows: usize,
+    mut handle: F,
+) -> Result<u64, String>
+where
+    F: FnMut(&Arc<Schema>, Vec<RecordBatch>) -> Result<(), String>,
+{
     let batch_size = batch_size.max(1);
-    let mut all_batches = Vec::new();
+    let fetch_count: c_long = if chunk_rows == 0 {
+        c_long::MAX
+    } else {
+        chunk_rows.min(c_long::MAX as usize) as c_long
+    };
+
     let mut total_rows: u64 = 0;
-    let mut schema: Option<Arc<Schema>> = None;
-    let mut columns_info: Option<Vec<SpiColumnInfo>> = None;
+    let mut schema_cols: Option<(Arc<Schema>, Vec<SpiColumnInfo>)> = None;
 
     pgrx::spi::Spi::connect(|client| {
-        let tuptable = client
-            .select(source_query, None, &[])
-            .map_err(|e| format!("SPI query failed: {}", e))?;
-
-        // Extract column info from the first call
-        let cols = unsafe { extract_spi_columns(&tuptable)? };
-        let arrow_schema = Arc::new(build_arrow_schema(&cols));
-        schema = Some(arrow_schema.clone());
-
-        let mut builders: Vec<TypedBuilder> = cols
-            .iter()
-            .map(|c| TypedBuilder::new(&c.arrow_type))
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let mut rows_in_batch: usize = 0;
-
-        for row in tuptable {
-            for (col_idx, col) in cols.iter().enumerate() {
-                unsafe {
-                    append_datum(&mut builders[col_idx], &row, col_idx, col.pg_oid)?;
-                }
+        let mut cursor = client.open_cursor(source_query, &[]);
+        loop {
+            let tuptable = cursor
+                .fetch(fetch_count)
+                .map_err(|e| format!("SPI cursor fetch failed: {}", e))?;
+            if tuptable.is_empty() {
+                break;
             }
-            rows_in_batch += 1;
-            total_rows += 1;
 
-            if rows_in_batch >= batch_size {
-                let arrays: Vec<Arc<dyn arrow::array::Array>> =
-                    builders.iter_mut().map(|b| b.finish()).collect();
-                let batch = RecordBatch::try_new(arrow_schema.clone(), arrays)
-                    .map_err(|e| format!("failed to create RecordBatch: {}", e))?;
-                all_batches.push(batch);
-
-                // Reset builders
-                builders = cols
-                    .iter()
-                    .map(|c| TypedBuilder::new(&c.arrow_type))
-                    .collect::<Result<Vec<_>, _>>()?;
-                rows_in_batch = 0;
+            // Derive column metadata once from the first non-empty fetch.
+            if schema_cols.is_none() {
+                let cols = unsafe { extract_spi_columns(&tuptable)? };
+                let arrow_schema = Arc::new(build_arrow_schema(&cols));
+                schema_cols = Some((arrow_schema, cols));
             }
-        }
+            let (schema, cols) = schema_cols.as_ref().unwrap();
 
-        // Flush remaining rows
-        if rows_in_batch > 0 {
-            let arrays: Vec<Arc<dyn arrow::array::Array>> =
-                builders.iter_mut().map(|b| b.finish()).collect();
-            let batch = RecordBatch::try_new(arrow_schema.clone(), arrays)
-                .map_err(|e| format!("failed to create RecordBatch: {}", e))?;
-            all_batches.push(batch);
+            let (batches, rows) = convert_spi_rows(tuptable, cols, schema, batch_size)?;
+            total_rows += rows;
+            handle(schema, batches)?;
         }
-
-        columns_info = Some(cols);
         Ok::<_, String>(())
     })
     .map_err(|e| format!("SPI connect failed: {}", e))?;
 
-    let schema = schema.ok_or_else(|| "no schema produced".to_string())?;
-    Ok((schema, all_batches, total_rows))
+    Ok(total_rows)
 }

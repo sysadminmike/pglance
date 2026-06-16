@@ -190,6 +190,27 @@ SELECT ts::text FROM t_types_ts;
 ----
 2025-06-15 14:30:00
 
+# ── json, jsonb ──
+# Both are stored in Lance as normalized JSON text (via serde_json).
+
+query II
+SELECT rows_written, (duration_ms >= 0) AS ok
+  FROM lance_append(
+    '${LANCE_WRITE_DIR}/t_types_json.lance',
+    $$SELECT '{"a":1}'::json AS j, '{"b":2}'::jsonb AS jb$$,
+    mode := 'create'
+  );
+----
+1 t
+
+statement ok
+SELECT lance_import('${SERVER}', '${SCHEMA}', 't_types_json', '${LANCE_WRITE_DIR}/t_types_json.lance', batch_size => NULL);
+
+query TT
+SELECT j, jb FROM t_types_json;
+----
+{"a":1} {"b":2}
+
 # ── Data integrity comparison: write N rows, read them back, compare ──
 # This creates a PG temp table, writes it to Lance, reads back via FDW,
 # and confirms every row matches using EXCEPT.

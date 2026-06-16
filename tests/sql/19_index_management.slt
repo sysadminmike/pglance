@@ -1,0 +1,116 @@
+# Test Lance scalar and full-text index management helpers.
+
+query II
+SELECT rows_written, (duration_ms >= 0) AS ok
+  FROM lance_append(
+    '${LANCE_WRITE_DIR}/t_index_management.lance',
+    'SELECT v::int4 AS id, (v % 3)::int4 AS bucket, ''document '' || v::text AS body FROM generate_series(1,6) v',
+    mode := 'create'
+  );
+----
+6 t
+
+query TT
+SELECT index_name = 'id_idx' AS name_ok,
+       lower(index_type) IN ('btree', 'b-tree') AS type_ok
+  FROM lance_create_scalar_index(
+    '${LANCE_WRITE_DIR}/t_index_management.lance',
+    'id',
+    'id_idx',
+    'btree'
+  );
+----
+t t
+
+query TT
+SELECT index_name = 'body_fts_idx' AS name_ok,
+       lower(index_type) IN ('inverted', 'fts') AS type_ok
+  FROM lance_create_fts_index(
+    '${LANCE_WRITE_DIR}/t_index_management.lance',
+    'body',
+    'body_fts_idx',
+    with_position := true
+  );
+----
+t t
+
+query I
+SELECT count(*) FROM lance_list_indices('${LANCE_WRITE_DIR}/t_index_management.lance');
+----
+2
+
+query T
+SELECT stats->>'num_unindexed_rows' = '0'
+  FROM lance_index_stats('${LANCE_WRITE_DIR}/t_index_management.lance', 'id_idx');
+----
+t
+
+query II
+SELECT rows_written, (duration_ms >= 0) AS ok
+  FROM lance_append(
+    '${LANCE_WRITE_DIR}/t_index_management.lance',
+    'SELECT v::int4 AS id, (v % 3)::int4 AS bucket, ''document '' || v::text AS body FROM generate_series(7,9) v'
+  );
+----
+3 t
+
+query T
+SELECT (stats->>'num_unindexed_rows')::bigint > 0
+  FROM lance_index_stats('${LANCE_WRITE_DIR}/t_index_management.lance', 'id_idx');
+----
+t
+
+query II
+SELECT requested_index_count, (duration_ms >= 0) AS ok
+  FROM lance_optimize_indices(
+    '${LANCE_WRITE_DIR}/t_index_management.lance',
+    index_names := ARRAY['id_idx', 'body_fts_idx']
+  );
+----
+2 t
+
+query TT
+SELECT id_stats.stats->>'num_unindexed_rows' = '0' AS id_caught_up,
+       fts_stats.stats->>'num_unindexed_rows' = '0' AS fts_caught_up
+  FROM lance_index_stats('${LANCE_WRITE_DIR}/t_index_management.lance', 'id_idx') id_stats
+ CROSS JOIN lance_index_stats('${LANCE_WRITE_DIR}/t_index_management.lance', 'body_fts_idx') fts_stats;
+----
+t t
+
+query I
+SELECT count(*)
+  FROM lance_list_indices('${LANCE_WRITE_DIR}/t_index_management.lance')
+ WHERE column_names ? 'id';
+----
+1
+
+query T
+SELECT index_name = 'body_fts_idx'
+  FROM lance_drop_index('${LANCE_WRITE_DIR}/t_index_management.lance', 'body_fts_idx');
+----
+t
+
+query I
+SELECT count(*) FROM lance_list_indices('${LANCE_WRITE_DIR}/t_index_management.lance');
+----
+1
+
+statement ok
+CREATE OR REPLACE FUNCTION capture_error(sql text)
+RETURNS jsonb
+LANGUAGE plpgsql AS $$
+DECLARE st text; msg text; det text;
+BEGIN
+  EXECUTE sql;
+  RETURN NULL;
+EXCEPTION WHEN OTHERS THEN
+  GET STACKED DIAGNOSTICS st = RETURNED_SQLSTATE, msg = MESSAGE_TEXT, det = PG_EXCEPTION_DETAIL;
+  RETURN jsonb_build_object('sqlstate', st, 'message', msg, 'detail', det);
+END $$;
+
+query T
+SELECT capture_error(
+  'SELECT * FROM lance_create_scalar_index(''' || '${LANCE_WRITE_DIR}/t_index_management.lance' || ''', ''bucket'', ''bad_idx'', ''not_an_index'')'
+) IS NOT NULL;
+----
+t

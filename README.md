@@ -26,9 +26,12 @@
 ### Maintenance
 
 - `lance_optimize()` - compact small or delete-heavy fragments in a Lance dataset
+- `lance_create_scalar_index()` / `lance_create_fts_index()` - create Lance scalar and full-text indexes
+- `lance_optimize_indices()` - catch indexes up after appends, merge-inserts, deletes, and updates
+- `lance_list_indices()` / `lance_index_stats()` / `lance_drop_index()` - inspect and manage Lance indexes
 - `lance_vacuum()` - remove old unreferenced dataset files after writes, deletes, and optimization
 
-## Quick Start (PostgreSQL 16)
+## Quick Start (PostgreSQL 17)
 
 ### Prerequisites
 
@@ -161,6 +164,30 @@ SELECT * FROM lance_merge_insert(
 
 > Note: The Lance SDK does not currently return separate insert/update counts, so `rows_inserted` and `rows_updated` may be NULL.
 
+#### Memory safety for large writes and merges
+
+`lance_append` and `lance_merge_insert` stream their `source_query` through a
+server-side cursor in chunks instead of buffering the entire result set in
+memory. This keeps very large operations (millions of rows) from exhausting RAM
+and triggering the Linux OOM killer. Two GUCs control the behaviour:
+
+| GUC | Default | Purpose |
+|---|---|---|
+| `lance.write_chunk_rows` | `100000` | Source rows fetched and processed per chunk. Lower it to reduce peak memory; set to `0` to process the whole source in a single pass. |
+| `lance.max_write_buffer_mb` | `2048` | Hard ceiling on the in-memory Arrow buffer for a chunk. If a chunk exceeds it, the operation aborts cleanly (rolling back the transaction) instead of being OOM-killed. Set to `0` to disable the guard. |
+
+```sql
+SET lance.write_chunk_rows = 50000;    -- smaller chunks = lower peak memory
+SET lance.max_write_buffer_mb = 2048;  -- abort cleanly rather than OOM
+```
+
+> **Atomicity caveat:** `lance_merge_insert` performs one Lance commit per chunk,
+> so it is **not** a single atomic operation. If it fails partway through, chunks
+> that already committed remain applied. Re-running an idempotent merge
+> (`when_matched := 'update'`) is safe. If you require strict all-or-nothing
+> semantics, set `lance.write_chunk_rows = 0` to force a single-pass commit
+> (subject to having enough memory, bounded by `lance.max_write_buffer_mb`).
+
 #### Delete rows by predicate
 
 ```sql
@@ -176,6 +203,92 @@ SELECT * FROM lance_delete(
 
 The `predicate` uses Lance's own expression syntax (a subset of SQL). Column names must match the Lance schema.
 
+### 6) Create and maintain Lance indexes
+
+Indexes are Lance dataset metadata and files. They are not PostgreSQL btree/gin indexes, and PostgreSQL does not create them with `CREATE INDEX`. Use the `lance_*_index` helper functions against the Lance dataset URI.
+
+#### Scalar indexes
+
+```sql
+SELECT * FROM lance_create_scalar_index(
+    uri         := '/path/to/dataset.lance',
+    column_name := 'customer_id',
+    index_name  := 'customer_id_idx',
+    index_type  := 'btree',       -- 'btree' | 'bitmap' | 'label_list'
+    replace     := false,
+    server_name := NULL
+);
+```
+
+Use `btree` for high-cardinality equality/range columns such as ids and timestamps. Use `bitmap` for low-cardinality columns such as status or category. Use `label_list` for list/tag fields.
+
+Merge-insert keys should be indexed deliberately by creating one scalar index per key column. Lance's public scalar index support is single-column; pglance does not expose a composite scalar index helper. For a multi-key merge, index each key with the type that fits that column:
+
+```sql
+SELECT * FROM lance_create_scalar_index('/data/orders.lance', 'tenant_id', 'tenant_id_idx', 'bitmap');
+SELECT * FROM lance_create_scalar_index('/data/orders.lance', 'order_id',  'order_id_idx',  'btree');
+```
+
+#### Full-text search indexes
+
+```sql
+SELECT * FROM lance_create_fts_index(
+    uri           := '/path/to/dataset.lance',
+    column_name   := 'body',
+    index_name    := 'body_fts_idx',
+    replace       := false,
+    tokenizer     := 'simple',
+    language      := 'English',
+    with_position := true
+);
+```
+
+Useful tokenizer values include `simple`, `whitespace`, `raw`, and `ngram`. `with_position := true` is required for phrase-style full-text queries and increases index size.
+
+#### Index maintenance after writes
+
+Appending, merge-inserting, deleting, or updating a Lance dataset can leave existing indexes with unindexed rows/fragments. Lance can still use fallback scanning in some cases, but latency can increase. Run index maintenance explicitly after write batches:
+
+```sql
+-- Append delta index segments for all indexes.
+SELECT * FROM lance_optimize_indices('/path/to/dataset.lance');
+
+-- Maintain only selected indexes.
+SELECT * FROM lance_optimize_indices(
+    uri         := '/path/to/dataset.lance',
+    index_names := ARRAY['customer_id_idx', 'body_fts_idx'],
+    mode        := 'append'
+);
+
+-- Merge recent index deltas.
+SELECT * FROM lance_optimize_indices(
+    uri                  := '/path/to/dataset.lance',
+    index_names          := ARRAY['body_fts_idx'],
+    mode                 := 'merge',
+    num_indices_to_merge := 4
+);
+```
+
+Inspect index health with `lance_index_stats`. The key field to monitor is `num_unindexed_rows`; a fully caught-up index reports `0`.
+
+```sql
+SELECT stats->>'index_type' AS index_type,
+       (stats->>'num_indexed_rows')::bigint AS indexed_rows,
+       (stats->>'num_unindexed_rows')::bigint AS unindexed_rows
+  FROM lance_index_stats('/path/to/dataset.lance', 'customer_id_idx');
+```
+
+List or drop indexes when needed:
+
+```sql
+SELECT index_name, index_type, column_names, rows_indexed
+  FROM lance_list_indices('/path/to/dataset.lance');
+
+SELECT * FROM lance_drop_index('/path/to/dataset.lance', 'customer_id_idx');
+```
+
+Vector index creation is intentionally not wrapped yet. pglance should expose vector indexes together with a PostgreSQL-facing vector search/query API so the index surface and query surface arrive as one coherent feature.
+
 #### S3 credentials via foreign server
 
 ```sql
@@ -187,9 +300,11 @@ SELECT * FROM lance_append(
 );
 ```
 
-### 6) Maintain Lance datasets
+### 7) Maintain Lance datasets
 
-Lance datasets accumulate fragments, old versions, transaction files, and replaced data files as you append, merge-insert, delete, and overwrite data. Use `lance_optimize()` to compact the active dataset state, then `lance_vacuum()` to remove old unreferenced files from storage.
+Lance datasets accumulate fragments, old versions, transaction files, index files, and replaced data files as you append, merge-insert, delete, and overwrite data. Use `lance_optimize_indices()` to keep indexes current, `lance_optimize()` to compact the active dataset state, then `lance_vacuum()` to remove old unreferenced files from storage.
+
+`lance_optimize()` and `lance_optimize_indices()` do different work: `lance_optimize()` compacts dataset fragments, while `lance_optimize_indices()` builds or merges index delta segments.
 
 #### Optimize fragments
 
@@ -264,6 +379,7 @@ Useful options:
 For routine maintenance, run optimize first and vacuum after the retention window you want to keep:
 
 ```sql
+SELECT * FROM lance_optimize_indices('/path/to/dataset.lance');
 SELECT * FROM lance_optimize('/path/to/dataset.lance');
 SELECT * FROM lance_vacuum('/path/to/dataset.lance');
 ```
@@ -362,4 +478,34 @@ You can pass normal psql connection flags through the script, and override the d
 
 ```bash
 LANCE_ADMIN_E2E_DIR=/tmp/lance_admin_e2e tests/e2e_admin_maintenance.sh -d pglance
+```
+
+### End-to-end index management test
+
+A standalone bash script creates scalar and FTS indexes, appends additional rows, checks `num_unindexed_rows`, runs `lance_optimize_indices`, and verifies the indexes are caught up.
+
+```bash
+tests/e2e_index_management.sh
+# or
+just e2e-index
+```
+
+You can override the dataset directory with `LANCE_INDEX_E2E_DIR`:
+
+```bash
+LANCE_INDEX_E2E_DIR=/tmp/lance_index_e2e tests/e2e_index_management.sh -d pglance
+```
+
+### Merge benchmark with and without indexes
+
+The merge benchmark script compares no-index merge-insert, single-key merge with a scalar index, and multi-key merge with one scalar index per key field.
+
+```bash
+tests/benchmark_merge_index.sh -d pglance
+```
+
+Tune row counts with environment variables:
+
+```bash
+BENCH_INITIAL_ROWS=100000 BENCH_MERGE_ROWS=25000 tests/benchmark_merge_index.sh -d pglance
 ```

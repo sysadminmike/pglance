@@ -1,6 +1,7 @@
-use crate::write::pg_to_arrow::spi_to_arrow_batches;
+use crate::write::pg_to_arrow::for_each_spi_chunk;
 use crate::write::storage::open_dataset;
 use lance_rs::dataset::{MergeInsertBuilder, WhenMatched, WhenNotMatched};
+use lance_rs::Dataset;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::runtime::Runtime;
@@ -10,6 +11,11 @@ use tokio::runtime::Runtime;
 /// Returns `(rows_merged, rows_inserted, rows_updated, duration_ms)`.
 /// Note: The Lance SDK may not return separate insert/update counts. If unavailable,
 /// `rows_inserted` and `rows_updated` will be -1 (indicating unknown).
+///
+/// The source query is streamed through a server-side cursor in chunks of
+/// `lance.write_chunk_rows` rows so that very large merges do not buffer the
+/// entire result set in memory. Each chunk is applied as its own Lance merge
+/// commit; a failure partway through therefore leaves earlier chunks applied.
 pub fn lance_merge_insert_impl(
     uri: &str,
     source_query: &str,
@@ -25,94 +31,109 @@ pub fn lance_merge_insert_impl(
         return Err("on_columns must not be empty".to_string());
     }
 
-    let (schema, batches, total_rows) = spi_to_arrow_batches(source_query, batch_size)?;
-
-    if batches.is_empty() {
-        return Ok((0, 0, 0, start.elapsed().as_millis() as i64));
-    }
-
     let rt = Runtime::new().map_err(|e| format!("failed to create tokio runtime: {}", e))?;
+    let chunk_rows = crate::write_chunk_rows();
 
-    rt.block_on(async {
-        let dataset = open_dataset(uri, server_name).await?;
+    // The dataset is opened on the first chunk and replaced with the updated
+    // dataset returned by each merge so the next chunk sees prior changes.
+    let mut dataset: Option<Arc<Dataset>> = None;
 
-        // Validate that on_columns exist in both source schema and Lance schema
-        let lance_schema = dataset.schema();
-        let lance_field_names: Vec<String> =
-            lance_schema.fields.iter().map(|f| f.name.clone()).collect();
-
-        for col in &on_columns {
-            if schema.column_with_name(col).is_none() {
-                return Err(format!(
-                    "on_column '{}' not found in source query result (columns: {})",
-                    col,
-                    schema
-                        .fields()
-                        .iter()
-                        .map(|f| f.name().as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ));
-            }
-            if !lance_field_names.contains(col) {
-                return Err(format!(
-                    "on_column '{}' not found in Lance schema (columns: {})",
-                    col,
-                    lance_field_names.join(", ")
-                ));
-            }
+    let total_rows = for_each_spi_chunk(source_query, batch_size, chunk_rows, |schema, batches| {
+        if batches.is_empty() {
+            return Ok(());
         }
 
-        let reader = arrow::record_batch::RecordBatchIterator::new(
-            batches.into_iter().map(Ok),
-            schema.clone(),
-        );
+        if dataset.is_none() {
+            let ds = rt.block_on(open_dataset(uri, server_name))?;
 
-        let dataset_arc = Arc::new(dataset);
-        let mut builder = MergeInsertBuilder::try_new(dataset_arc, on_columns.clone())
-            .map_err(|e| format!("MergeInsertBuilder::try_new failed: {}", e))?;
+            // Validate on_columns exist in both the source and Lance schemas.
+            for col in &on_columns {
+                if schema.column_with_name(col).is_none() {
+                    return Err(format!(
+                        "on_column '{}' not found in source query result (columns: {})",
+                        col,
+                        schema
+                            .fields()
+                            .iter()
+                            .map(|f| f.name().as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                }
+            }
+            let lance_field_names: Vec<String> =
+                ds.schema().fields.iter().map(|f| f.name.clone()).collect();
+            for col in &on_columns {
+                if !lance_field_names.contains(col) {
+                    return Err(format!(
+                        "on_column '{}' not found in Lance schema (columns: {})",
+                        col,
+                        lance_field_names.join(", ")
+                    ));
+                }
+            }
 
-        match when_matched {
-            "update" => {
-                builder.when_matched(WhenMatched::UpdateAll);
-            }
-            "nothing" => {
-                builder.when_matched(WhenMatched::DoNothing);
-            }
-            _ => {
-                return Err(format!(
-                    "invalid when_matched value '{}': must be 'update' or 'nothing'",
-                    when_matched
-                ));
-            }
+            dataset = Some(Arc::new(ds));
         }
 
-        match when_not_matched {
-            "insert" => {
-                builder.when_not_matched(WhenNotMatched::InsertAll);
-            }
-            "nothing" => {
-                builder.when_not_matched(WhenNotMatched::DoNothing);
-            }
-            _ => {
-                return Err(format!(
-                    "invalid when_not_matched value '{}': must be 'insert' or 'nothing'",
-                    when_not_matched
-                ));
-            }
-        }
+        let current = dataset.take().expect("dataset initialized on first chunk");
 
-        let (_dataset, _stats) = builder
-            .try_build()
-            .map_err(|e| format!("merge_insert try_build failed: {}", e))?
-            .execute_reader(reader)
-            .await
-            .map_err(|e| format!("lance merge_insert failed: {}", e))?;
+        let new_dataset = rt.block_on(async {
+            let reader = arrow::record_batch::RecordBatchIterator::new(
+                batches.into_iter().map(Ok),
+                schema.clone(),
+            );
 
+            let mut builder = MergeInsertBuilder::try_new(current, on_columns.clone())
+                .map_err(|e| format!("MergeInsertBuilder::try_new failed: {}", e))?;
+
+            match when_matched {
+                "update" => {
+                    builder.when_matched(WhenMatched::UpdateAll);
+                }
+                "nothing" => {
+                    builder.when_matched(WhenMatched::DoNothing);
+                }
+                _ => {
+                    return Err(format!(
+                        "invalid when_matched value '{}': must be 'update' or 'nothing'",
+                        when_matched
+                    ));
+                }
+            }
+
+            match when_not_matched {
+                "insert" => {
+                    builder.when_not_matched(WhenNotMatched::InsertAll);
+                }
+                "nothing" => {
+                    builder.when_not_matched(WhenNotMatched::DoNothing);
+                }
+                _ => {
+                    return Err(format!(
+                        "invalid when_not_matched value '{}': must be 'insert' or 'nothing'",
+                        when_not_matched
+                    ));
+                }
+            }
+
+            let (ds, _stats) = builder
+                .try_build()
+                .map_err(|e| format!("merge_insert try_build failed: {}", e))?
+                .execute_reader(reader)
+                .await
+                .map_err(|e| format!("lance merge_insert failed: {}", e))?;
+
+            Ok(ds)
+        })?;
+
+        dataset = Some(new_dataset);
         Ok(())
     })?;
 
     let duration_ms = start.elapsed().as_millis() as i64;
-    // Lance merge_insert does not provide separate insert/update counts
-    Ok((total_rows as i64, -1, -1, duration_ms))
+    // Lance merge_insert does not provide separate insert/update counts here.
+    // For an empty source (no rows processed) report 0/0; otherwise unknown (-1).
+    let (rows_inserted, rows_updated) = if total_rows == 0 { (0, 0) } else { (-1, -1) };
+    Ok((total_rows as i64, rows_inserted, rows_updated, duration_ms))
 }

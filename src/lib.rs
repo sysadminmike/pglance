@@ -1,3 +1,4 @@
+use pgrx::guc::{GucContext, GucFlags, GucRegistry, GucSetting};
 use pgrx::prelude::*;
 use pgrx::JsonB;
 
@@ -5,6 +6,69 @@ mod fdw;
 mod write;
 
 pgrx::pg_module_magic!();
+
+/// Maximum amount of source data (in MB) buffered in memory before a Lance
+/// write/merge aborts. Guards against the OOM killer taking down PostgreSQL on
+/// very large `lance_append` / `lance_merge_insert` operations. `0` disables it.
+static MAX_WRITE_BUFFER_MB: GucSetting<i32> = GucSetting::<i32>::new(2048);
+
+/// Number of source rows fetched and processed per chunk during
+/// `lance_append` / `lance_merge_insert`. Chunking bounds peak memory so large
+/// operations complete instead of being OOM-killed. `0` disables chunking
+/// (the entire source is processed in a single pass).
+static WRITE_CHUNK_ROWS: GucSetting<i32> = GucSetting::<i32>::new(100_000);
+
+#[pg_guard]
+pub extern "C-unwind" fn _PG_init() {
+    GucRegistry::define_int_guc(
+        "lance.max_write_buffer_mb",
+        "Max MB of source rows buffered in memory before a Lance write/merge aborts.",
+        "lance_append and lance_merge_insert stage the entire source query in memory as Arrow \
+         batches before writing. This limit aborts cleanly (rolling back the transaction) once \
+         the buffered data exceeds the configured size, instead of letting the Linux OOM killer \
+         terminate PostgreSQL. Set to 0 to disable the guard.",
+        &MAX_WRITE_BUFFER_MB,
+        0,
+        i32::MAX,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_int_guc(
+        "lance.write_chunk_rows",
+        "Source rows processed per chunk during a Lance write/merge.",
+        "lance_append and lance_merge_insert stream the source query through a server-side cursor \
+         in chunks of this many rows, bounding peak memory so very large operations complete \
+         instead of being OOM-killed. Note: merges run one Lance commit per chunk, so a failure \
+         partway through leaves earlier chunks applied. Set to 0 to process the whole source in a \
+         single pass (subject to lance.max_write_buffer_mb).",
+        &WRITE_CHUNK_ROWS,
+        0,
+        i32::MAX,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+}
+
+/// The configured write-buffer guard limit in bytes, or `0` when disabled.
+pub fn max_write_buffer_bytes() -> usize {
+    let mb = MAX_WRITE_BUFFER_MB.get();
+    if mb <= 0 {
+        0
+    } else {
+        (mb as usize).saturating_mul(1024 * 1024)
+    }
+}
+
+/// The configured per-chunk source row count, or `0` when chunking is disabled.
+pub fn write_chunk_rows() -> usize {
+    let n = WRITE_CHUNK_ROWS.get();
+    if n <= 0 {
+        0
+    } else {
+        n as usize
+    }
+}
 
 pgrx::extension_sql!(
     r#"
@@ -188,6 +252,218 @@ fn lance_delete(
             .unwrap_or_else(|e| pgrx::error!("lance_delete failed: {}", e));
 
     TableIterator::new(vec![(fragments_removed, duration_ms)])
+}
+
+#[pg_extern]
+fn lance_create_scalar_index(
+    uri: &str,
+    column_name: &str,
+    index_name: &str,
+    index_type: default!(&str, "'btree'"),
+    replace: default!(bool, "false"),
+    server_name: default!(Option<&str>, "NULL"),
+) -> TableIterator<
+    'static,
+    (
+        name!(index_name, String),
+        name!(column_name, String),
+        name!(index_type, String),
+        name!(duration_ms, i64),
+    ),
+> {
+    let row = write::index::lance_create_scalar_index_impl(
+        uri,
+        column_name,
+        index_name,
+        index_type,
+        replace,
+        server_name,
+    )
+    .unwrap_or_else(|e| pgrx::error!("lance_create_scalar_index failed: {}", e));
+
+    TableIterator::new(vec![row])
+}
+
+#[pg_extern]
+#[allow(clippy::too_many_arguments)]
+fn lance_create_fts_index(
+    uri: &str,
+    column_name: &str,
+    index_name: &str,
+    replace: default!(bool, "false"),
+    tokenizer: default!(&str, "'simple'"),
+    language: default!(&str, "'English'"),
+    with_position: default!(bool, "false"),
+    lower_case: default!(bool, "true"),
+    stem: default!(bool, "false"),
+    remove_stop_words: default!(bool, "false"),
+    ascii_folding: default!(bool, "false"),
+    max_token_length: default!(Option<i64>, "NULL"),
+    ngram_min_length: default!(Option<i64>, "NULL"),
+    ngram_max_length: default!(Option<i64>, "NULL"),
+    ngram_prefix_only: default!(bool, "false"),
+    memory_limit_mb: default!(Option<i64>, "NULL"),
+    num_workers: default!(Option<i64>, "NULL"),
+    server_name: default!(Option<&str>, "NULL"),
+) -> TableIterator<
+    'static,
+    (
+        name!(index_name, String),
+        name!(column_name, String),
+        name!(index_type, String),
+        name!(duration_ms, i64),
+    ),
+> {
+    let row = write::index::lance_create_fts_index_impl(
+        uri,
+        column_name,
+        index_name,
+        replace,
+        tokenizer,
+        language,
+        with_position,
+        lower_case,
+        stem,
+        remove_stop_words,
+        ascii_folding,
+        max_token_length,
+        ngram_min_length,
+        ngram_max_length,
+        ngram_prefix_only,
+        memory_limit_mb,
+        num_workers,
+        server_name,
+    )
+    .unwrap_or_else(|e| pgrx::error!("lance_create_fts_index failed: {}", e));
+
+    TableIterator::new(vec![row])
+}
+
+#[pg_extern]
+fn lance_optimize_indices(
+    uri: &str,
+    index_names: default!(Vec<String>, "ARRAY[]::text[]"),
+    mode: default!(&str, "'append'"),
+    num_indices_to_merge: default!(Option<i64>, "NULL"),
+    server_name: default!(Option<&str>, "NULL"),
+) -> TableIterator<'static, (name!(requested_index_count, i64), name!(duration_ms, i64))> {
+    let row = write::index::lance_optimize_indices_impl(
+        uri,
+        index_names,
+        mode,
+        num_indices_to_merge,
+        server_name,
+    )
+    .unwrap_or_else(|e| pgrx::error!("lance_optimize_indices failed: {}", e));
+
+    TableIterator::new(vec![row])
+}
+
+#[pg_extern]
+#[allow(clippy::type_complexity)]
+fn lance_list_indices(
+    uri: &str,
+    server_name: default!(Option<&str>, "NULL"),
+) -> TableIterator<
+    'static,
+    (
+        name!(index_name, String),
+        name!(index_type, String),
+        name!(column_names, JsonB),
+        name!(type_url, String),
+        name!(rows_indexed, i64),
+        name!(total_size_bytes, Option<i64>),
+        name!(details, JsonB),
+    ),
+> {
+    let rows = write::index::lance_list_indices_impl(uri, server_name)
+        .unwrap_or_else(|e| pgrx::error!("lance_list_indices failed: {}", e))
+        .into_iter()
+        .map(
+            |(
+                index_name,
+                index_type,
+                column_names,
+                type_url,
+                rows_indexed,
+                total_size_bytes,
+                details,
+            )| {
+                let column_names = serde_json::from_str(&column_names).unwrap_or_else(|e| {
+                    pgrx::error!("lance_list_indices failed to parse columns: {}", e)
+                });
+                let details = serde_json::from_str(&details).unwrap_or_else(|e| {
+                    pgrx::error!("lance_list_indices failed to parse details: {}", e)
+                });
+
+                (
+                    index_name,
+                    index_type,
+                    JsonB(column_names),
+                    type_url,
+                    rows_indexed,
+                    total_size_bytes,
+                    JsonB(details),
+                )
+            },
+        )
+        .collect::<Vec<_>>();
+
+    TableIterator::new(rows)
+}
+
+#[pg_extern]
+fn lance_index_stats(
+    uri: &str,
+    index_name: &str,
+    server_name: default!(Option<&str>, "NULL"),
+) -> TableIterator<'static, (name!(index_name, String), name!(stats, JsonB))> {
+    let (index_name, stats) = write::index::lance_index_stats_impl(uri, index_name, server_name)
+        .unwrap_or_else(|e| pgrx::error!("lance_index_stats failed: {}", e));
+    let stats = serde_json::from_str(&stats)
+        .unwrap_or_else(|e| pgrx::error!("lance_index_stats failed to parse stats: {}", e));
+
+    TableIterator::new(vec![(index_name, JsonB(stats))])
+}
+
+#[pg_extern]
+fn lance_drop_index(
+    uri: &str,
+    index_name: &str,
+    server_name: default!(Option<&str>, "NULL"),
+) -> TableIterator<'static, (name!(index_name, String), name!(duration_ms, i64))> {
+    let row = write::index::lance_drop_index_impl(uri, index_name, server_name)
+        .unwrap_or_else(|e| pgrx::error!("lance_drop_index failed: {}", e));
+
+    TableIterator::new(vec![row])
+}
+
+#[pg_extern]
+fn lance_fts_search_count(
+    uri: &str,
+    column_name: &str,
+    query_text: &str,
+    limit: default!(Option<i64>, "NULL"),
+    server_name: default!(Option<&str>, "NULL"),
+) -> TableIterator<
+    'static,
+    (
+        name!(column_name, String),
+        name!(query_text, String),
+        name!(rows_matched, i64),
+        name!(duration_ms, i64),
+    ),
+> {
+    let row = write::index::lance_fts_search_count_impl(
+        uri,
+        column_name,
+        query_text,
+        limit,
+        server_name,
+    )
+    .unwrap_or_else(|e| pgrx::error!("lance_fts_search_count failed: {}", e));
+
+    TableIterator::new(vec![row])
 }
 
 #[pg_extern]

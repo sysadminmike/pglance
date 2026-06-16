@@ -1,11 +1,15 @@
 .DS_Store
 .idea/
+.vscode/
 /target
 *.iml
 **/*.rs.bk
 Cargo.lock
 .venv/
 .ruff_cache/
+
+# Local scratch / temp files
+.tmp_*
 
 # Test-related directories and files
 integration_tests/testdata/

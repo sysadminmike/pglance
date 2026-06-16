@@ -40,6 +40,18 @@ test pg=pg_version: ensure-pgrx
 e2e-admin:
     bash tests/e2e_admin_maintenance.sh
 
+# Run external index-management e2e test against the current PG connection.
+e2e-index:
+    bash tests/e2e_index_management.sh
+
+# Benchmark merge-insert with no index, one key index, and multiple key indexes.
+bench-merge-index:
+    bash tests/benchmark_merge_index.sh
+
+# Benchmark UUID merge-insert with no index, one key index, and multiple key indexes.
+bench-uuid-merge-index:
+    bash tests/benchmark_uuid_merge_index.sh
+
 # Build extension
 build pg=pg_version: ensure-pgrx
     cargo pgrx package --pg-config "$(cargo pgrx info pg-config {{pg}})" --no-default-features --features pg{{pg}}

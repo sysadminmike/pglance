@@ -1,8 +1,9 @@
-use crate::write::pg_to_arrow::spi_to_arrow_batches;
+use crate::write::pg_to_arrow::for_each_spi_chunk;
 use crate::write::storage::{open_dataset, storage_options_vec};
 use lance_rs::dataset::WriteMode;
 use lance_rs::io::{ObjectStoreParams, StorageOptionsAccessor};
 use lance_rs::Dataset;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::runtime::Runtime;
@@ -10,6 +11,11 @@ use tokio::runtime::Runtime;
 /// Execute `lance_append` — write rows from a PostgreSQL query into a Lance dataset.
 ///
 /// Returns `(rows_written, duration_ms)`.
+///
+/// The source query is streamed through a server-side cursor in chunks of
+/// `lance.write_chunk_rows` rows so that large writes do not buffer the entire
+/// result set in memory. The first chunk uses the requested `mode`; subsequent
+/// chunks append to the dataset created/overwritten by the first chunk.
 pub fn lance_append_impl(
     uri: &str,
     source_query: &str,
@@ -19,57 +25,73 @@ pub fn lance_append_impl(
 ) -> Result<(i64, i64), String> {
     let start = Instant::now();
 
-    let (schema, batches, total_rows) = spi_to_arrow_batches(source_query, batch_size)?;
-
-    if batches.is_empty() {
-        return Ok((0, start.elapsed().as_millis() as i64));
+    match mode {
+        "create" | "append" | "overwrite" => {}
+        _ => {
+            return Err(format!(
+                "invalid mode '{}': must be 'create', 'append', or 'overwrite'",
+                mode
+            ))
+        }
     }
 
     let rt = Runtime::new().map_err(|e| format!("failed to create tokio runtime: {}", e))?;
+    let storage_opts: HashMap<String, String> =
+        storage_options_vec(server_name)?.into_iter().collect();
+    let chunk_rows = crate::write_chunk_rows();
 
-    let storage_opts = storage_options_vec(server_name)?;
+    let mut first = true;
 
-    rt.block_on(async {
-        let write_mode = match mode {
-            "create" => WriteMode::Create,
-            "append" => WriteMode::Append,
-            "overwrite" => WriteMode::Overwrite,
-            _ => {
-                return Err(format!(
-                    "invalid mode '{}': must be 'create', 'append', or 'overwrite'",
-                    mode
-                ))
+    let total_rows = for_each_spi_chunk(source_query, batch_size, chunk_rows, |schema, batches| {
+        if batches.is_empty() {
+            return Ok(());
+        }
+
+        // First chunk honors the requested mode; later chunks always append to it.
+        let write_mode = if first {
+            match mode {
+                "create" => WriteMode::Create,
+                "overwrite" => WriteMode::Overwrite,
+                _ => WriteMode::Append,
             }
+        } else {
+            WriteMode::Append
         };
 
-        let reader =
-            arrow::record_batch::RecordBatchIterator::new(batches.into_iter().map(Ok), schema);
+        rt.block_on(async {
+            // For an append into a pre-existing dataset, verify it exists up front
+            // so we surface a clear error (matching prior behavior).
+            if first && mode == "append" {
+                open_dataset(uri, server_name).await?;
+            }
 
-        if mode == "append" {
-            open_dataset(uri, server_name).await?;
-        }
-
-        let mut params = lance_rs::dataset::WriteParams {
-            mode: write_mode,
-            ..Default::default()
-        };
-
-        // Apply storage options
-        if !storage_opts.is_empty() {
-            let opts_map: std::collections::HashMap<String, String> =
-                storage_opts.into_iter().collect();
-            params.store_params = Some(ObjectStoreParams {
-                storage_options_accessor: Some(Arc::new(
-                    StorageOptionsAccessor::with_static_options(opts_map),
-                )),
+            let mut params = lance_rs::dataset::WriteParams {
+                mode: write_mode,
                 ..Default::default()
-            });
-        }
+            };
 
-        Dataset::write(reader, uri, Some(params))
-            .await
-            .map_err(|e| format!("lance write failed: {}", e))?;
+            if !storage_opts.is_empty() {
+                params.store_params = Some(ObjectStoreParams {
+                    storage_options_accessor: Some(Arc::new(
+                        StorageOptionsAccessor::with_static_options(storage_opts.clone()),
+                    )),
+                    ..Default::default()
+                });
+            }
 
+            let reader = arrow::record_batch::RecordBatchIterator::new(
+                batches.into_iter().map(Ok),
+                schema.clone(),
+            );
+
+            Dataset::write(reader, uri, Some(params))
+                .await
+                .map_err(|e| format!("lance write failed: {}", e))?;
+
+            Ok::<_, String>(())
+        })?;
+
+        first = false;
         Ok(())
     })?;
 
