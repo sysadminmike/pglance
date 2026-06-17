@@ -8,7 +8,7 @@ use tokio::runtime::Runtime;
 
 /// Execute `lance_merge_insert` — upsert rows from a PostgreSQL query into a Lance dataset.
 ///
-/// Returns `(rows_merged, rows_inserted, rows_updated, duration_ms)`.
+/// Returns `(rows_merged, rows_inserted, rows_updated, duration_ms, chunk_txns, chunk_rows)`.
 /// Note: The Lance SDK may not return separate insert/update counts. If unavailable,
 /// `rows_inserted` and `rows_updated` will be -1 (indicating unknown).
 ///
@@ -24,7 +24,7 @@ pub fn lance_merge_insert_impl(
     when_not_matched: &str,
     batch_size: usize,
     server_name: Option<&str>,
-) -> Result<(i64, i64, i64, i64), String> {
+) -> Result<(i64, i64, i64, i64, i64, i64), String> {
     let start = Instant::now();
 
     if on_columns.is_empty() {
@@ -37,6 +37,7 @@ pub fn lance_merge_insert_impl(
     // The dataset is opened on the first chunk and replaced with the updated
     // dataset returned by each merge so the next chunk sees prior changes.
     let mut dataset: Option<Arc<Dataset>> = None;
+    let mut chunk_txns: i64 = 0;
 
     let total_rows = for_each_spi_chunk(source_query, batch_size, chunk_rows, |schema, batches| {
         if batches.is_empty() {
@@ -128,12 +129,21 @@ pub fn lance_merge_insert_impl(
         })?;
 
         dataset = Some(new_dataset);
+        chunk_txns += 1;
         Ok(())
     })?;
 
     let duration_ms = start.elapsed().as_millis() as i64;
+    let chunk_rows_i64 = chunk_rows as i64;
     // Lance merge_insert does not provide separate insert/update counts here.
     // For an empty source (no rows processed) report 0/0; otherwise unknown (-1).
     let (rows_inserted, rows_updated) = if total_rows == 0 { (0, 0) } else { (-1, -1) };
-    Ok((total_rows as i64, rows_inserted, rows_updated, duration_ms))
+    Ok((
+        total_rows as i64,
+        rows_inserted,
+        rows_updated,
+        duration_ms,
+        chunk_txns,
+        chunk_rows_i64,
+    ))
 }

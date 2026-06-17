@@ -213,9 +213,11 @@ fn lance_merge_insert(
         name!(rows_inserted, Option<i64>),
         name!(rows_updated, Option<i64>),
         name!(duration_ms, i64),
+        name!(chunk_txns, i64),
+        name!(chunk_rows, i64),
     ),
 > {
-    let (rows_merged, rows_inserted, rows_updated, duration_ms) =
+    let (rows_merged, rows_inserted, rows_updated, duration_ms, chunk_txns, chunk_rows) =
         write::merge_insert::lance_merge_insert_impl(
             uri,
             source_query,
@@ -238,7 +240,14 @@ fn lance_merge_insert(
         Some(rows_updated)
     };
 
-    TableIterator::new(vec![(rows_merged, inserted, updated, duration_ms)])
+    TableIterator::new(vec![(
+        rows_merged,
+        inserted,
+        updated,
+        duration_ms,
+        chunk_txns,
+        chunk_rows,
+    )])
 }
 
 #[pg_extern]

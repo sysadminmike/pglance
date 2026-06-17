@@ -162,6 +162,11 @@ SELECT * FROM lance_merge_insert(
 --         1500 |               |              |        2340
 ```
 
+Chunk diagnostics are also returned:
+
+- `chunk_txns`: number of per-chunk Lance merge commits executed
+- `chunk_rows`: configured `lance.write_chunk_rows` value used for the merge (`0` means chunking disabled)
+
 > Note: The Lance SDK does not currently return separate insert/update counts, so `rows_inserted` and `rows_updated` may be NULL.
 
 #### Memory safety for large writes and merges

@@ -23,8 +23,13 @@ SELECT count(*) FROM t_merge_base;
 # ── Merge: update existing + insert new (default behaviour) ──
 # Source has ids 3,4,5,6,7 — ids 3-5 exist (update), 6-7 are new (insert)
 
-query IIII
-SELECT rows_merged, rows_inserted IS NULL AS ins_null, rows_updated IS NULL AS upd_null, (duration_ms >= 0) AS time_ok
+query IIIIII
+SELECT rows_merged,
+       rows_inserted IS NULL AS ins_null,
+       rows_updated IS NULL AS upd_null,
+       (duration_ms >= 0) AS time_ok,
+       (chunk_txns = 1) AS txns_ok,
+       (chunk_rows > 0) AS chunk_rows_ok
   FROM lance_merge_insert(
     '${LANCE_WRITE_DIR}/t_merge_test.lance',
     'SELECT v::int4 AS id, ''merged_'' || v::text AS name, (v * 10)::float8 AS score FROM generate_series(3,7) v',
@@ -33,7 +38,7 @@ SELECT rows_merged, rows_inserted IS NULL AS ins_null, rows_updated IS NULL AS u
     when_not_matched := 'insert'
   );
 ----
-5 t t t
+5 t t t t t
 
 # Read back — should have 7 rows total. Rows 1,2 unchanged, 3-5 updated, 6-7 new.
 
@@ -93,8 +98,13 @@ SELECT rows_written, (duration_ms >= 0) AS ok
 ----
 3 t
 
-query IIII
-SELECT rows_merged, rows_inserted IS NULL AS ins_null, rows_updated IS NULL AS upd_null, (duration_ms >= 0) AS time_ok
+query IIIIII
+SELECT rows_merged,
+       rows_inserted IS NULL AS ins_null,
+       rows_updated IS NULL AS upd_null,
+       (duration_ms >= 0) AS time_ok,
+       (chunk_txns = 1) AS txns_ok,
+       (chunk_rows > 0) AS chunk_rows_ok
   FROM lance_merge_insert(
     '${LANCE_WRITE_DIR}/t_merge_nothing.lance',
     'SELECT v::int4 AS id, ''new_'' || v::text AS name FROM generate_series(2,5) v',
@@ -103,7 +113,7 @@ SELECT rows_merged, rows_inserted IS NULL AS ins_null, rows_updated IS NULL AS u
     when_not_matched := 'insert'
   );
 ----
-4 t t t
+4 t t t t t
 
 statement ok
 SELECT lance_import('${SERVER}', '${SCHEMA}', 't_merge_nothing', '${LANCE_WRITE_DIR}/t_merge_nothing.lance', batch_size => NULL);
@@ -142,8 +152,13 @@ SELECT rows_written, (duration_ms >= 0) AS ok
 ----
 3 t
 
-query IIII
-SELECT rows_merged, rows_inserted IS NULL AS ins_null, rows_updated IS NULL AS upd_null, (duration_ms >= 0) AS time_ok
+query IIIIII
+SELECT rows_merged,
+       rows_inserted IS NULL AS ins_null,
+       rows_updated IS NULL AS upd_null,
+       (duration_ms >= 0) AS time_ok,
+       (chunk_txns = 1) AS txns_ok,
+       (chunk_rows > 0) AS chunk_rows_ok
   FROM lance_merge_insert(
     '${LANCE_WRITE_DIR}/t_merge_upd_only.lance',
     'SELECT v::int4 AS id, ''upd_'' || v::text AS tag FROM generate_series(2,5) v',
@@ -152,7 +167,7 @@ SELECT rows_merged, rows_inserted IS NULL AS ins_null, rows_updated IS NULL AS u
     when_not_matched := 'nothing'
   );
 ----
-4 t t t
+4 t t t t t
 
 statement ok
 SELECT lance_import('${SERVER}', '${SCHEMA}', 't_merge_upd_only', '${LANCE_WRITE_DIR}/t_merge_upd_only.lance', batch_size => NULL);
@@ -181,15 +196,20 @@ upd_3
 
 # ── Merge with empty source (zero rows) — no-op ──
 
-query IIII
-SELECT rows_merged, rows_inserted IS NULL AS ins_null, rows_updated IS NULL AS upd_null, (duration_ms >= 0) AS time_ok
+query IIIIII
+SELECT rows_merged,
+       rows_inserted IS NULL AS ins_null,
+       rows_updated IS NULL AS upd_null,
+       (duration_ms >= 0) AS time_ok,
+       (chunk_txns = 0) AS txns_ok,
+       (chunk_rows > 0) AS chunk_rows_ok
   FROM lance_merge_insert(
     '${LANCE_WRITE_DIR}/t_merge_upd_only.lance',
     'SELECT 1::int4 AS id, ''x''::text AS tag WHERE false',
     ARRAY['id']
   );
 ----
-0 f f t
+0 f f t t t
 
 # ── Error: empty on_columns ──
 
@@ -253,8 +273,13 @@ SELECT rows_written, (duration_ms >= 0) AS ok
 50 t
 
 # Merge source: ids 26..75 — 25 updates (26..50) + 25 inserts (51..75)
-query IIII
-SELECT rows_merged, rows_inserted IS NULL AS ins_null, rows_updated IS NULL AS upd_null, (duration_ms >= 0) AS time_ok
+query IIIIII
+SELECT rows_merged,
+       rows_inserted IS NULL AS ins_null,
+       rows_updated IS NULL AS upd_null,
+       (duration_ms >= 0) AS time_ok,
+       (chunk_txns = 8) AS txns_ok,
+       (chunk_rows = 7) AS chunk_rows_ok
   FROM lance_merge_insert(
     '${LANCE_WRITE_DIR}/t_merge_chunked.lance',
     'SELECT v::int4 AS id, ''merged_'' || v::text AS name FROM generate_series(26,75) v',
@@ -263,7 +288,7 @@ SELECT rows_merged, rows_inserted IS NULL AS ins_null, rows_updated IS NULL AS u
     when_not_matched := 'insert'
   );
 ----
-50 t t t
+50 t t t t t
 
 statement ok
 SELECT lance_import('${SERVER}', '${SCHEMA}', 't_merge_chunked', '${LANCE_WRITE_DIR}/t_merge_chunked.lance', batch_size => NULL);

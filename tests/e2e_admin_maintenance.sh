@@ -114,17 +114,30 @@ SELECT * FROM lance_append(
   '${DATASET}',
   'SELECT v::int4 AS id, ''row_'' || v::text AS label FROM generate_series(2001, 3000) v'
 );
+SQL
 
-SELECT * FROM lance_merge_insert(
-  '${DATASET}',
-  'SELECT v::int4 AS id, ''updated_'' || v::text AS label FROM generate_series(1, 500) v
-   UNION ALL
-   SELECT v::int4 AS id, ''new_'' || v::text AS label FROM generate_series(3001, 3500) v',
-  on_columns := ARRAY['id'],
-  when_matched := 'update',
-  when_not_matched := 'insert'
-);
+merge_stats=$(run_psql -At <<SQL | tail -n 1
+SET lance.write_chunk_rows = 125;
 
+SELECT rows_merged || '|' || chunk_txns || '|' || chunk_rows
+  FROM lance_merge_insert(
+    '${DATASET}',
+    'SELECT v::int4 AS id, ''updated_'' || v::text AS label FROM generate_series(1, 500) v
+     UNION ALL
+     SELECT v::int4 AS id, ''new_'' || v::text AS label FROM generate_series(3001, 3500) v',
+    on_columns := ARRAY['id'],
+    when_matched := 'update',
+    when_not_matched := 'insert'
+  );
+SQL
+)
+IFS='|' read -r merge_rows merge_chunk_txns merge_chunk_rows <<<"$merge_stats"
+echo "merge_stats rows_merged=${merge_rows} chunk_txns=${merge_chunk_txns} chunk_rows=${merge_chunk_rows}"
+assert_eq 1000 "$merge_rows" "merge rows_merged"
+assert_eq 8 "$merge_chunk_txns" "merge chunk_txns"
+assert_eq 125 "$merge_chunk_rows" "merge chunk_rows"
+
+run_psql <<SQL
 SELECT * FROM lance_delete(
   '${DATASET}',
   'id >= 2500 AND id <= 3500'
