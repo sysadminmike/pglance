@@ -25,10 +25,10 @@ pg_test = ["tempfile", "sqllogictest"]
 
 [dependencies]
 pgrx = "=0.14.3"
-lance_rs = { package = "lance", version = "7.0.0" }
-lance-index = "7.0.0"
-lance-namespace = "7.0.0"
-lance-namespace-impls = { version = "7.0.0", features = ["rest"] }
+lance_rs = { package = "lance", git = "https://github.com/lance-format/lance", branch = "main" }
+lance-index = { git = "https://github.com/lance-format/lance", branch = "main" }
+lance-namespace = { git = "https://github.com/lance-format/lance", branch = "main" }
+lance-namespace-impls = { git = "https://github.com/lance-format/lance", branch = "main", features = ["rest"] }
 arrow = "58.0.0"
 arrow-schema = "58.0.0"
 tokio = { version = "1.0", features = ["rt-multi-thread", "macros"] }
