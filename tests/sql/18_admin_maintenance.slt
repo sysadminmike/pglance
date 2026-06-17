@@ -41,7 +41,8 @@ SELECT (fragments_removed >= 0) AS fr_ok,
   FROM lance_optimize(
     '${LANCE_WRITE_DIR}/t_admin_maintenance.lance',
     target_rows_per_fragment := 1000000,
-    compaction_mode := 'reencode'
+    compaction_mode := 'reencode',
+    io_buffer_size := 1048576
   );
 ----
 t t t t t
@@ -97,6 +98,13 @@ END $$;
 query T
 SELECT capture_error(
   'SELECT * FROM lance_optimize(''' || '${LANCE_WRITE_DIR}/t_admin_maintenance.lance' || ''', compaction_mode := ''bad'')'
+) IS NOT NULL;
+----
+t
+
+query T
+SELECT capture_error(
+  'SELECT * FROM lance_optimize(''' || '${LANCE_WRITE_DIR}/t_admin_maintenance.lance' || ''', io_buffer_size := -1)'
 ) IS NOT NULL;
 ----
 t

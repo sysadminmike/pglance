@@ -161,7 +161,8 @@ SELECT fragments_removed,
   FROM lance_optimize(
     '${DATASET}',
     target_rows_per_fragment := 1000000,
-    compaction_mode := 'reencode'
+    compaction_mode := 'reencode',
+    io_buffer_size := 1048576
   );
 SQL
 

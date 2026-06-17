@@ -13,6 +13,16 @@ fn optional_usize(value: Option<i64>, name: &str) -> Result<Option<usize>, Strin
     }
 }
 
+fn optional_u64(value: Option<i64>, name: &str) -> Result<Option<u64>, String> {
+    match value {
+        Some(value) if value < 0 => Err(format!("{} must be non-negative", name)),
+        Some(value) => u64::try_from(value)
+            .map(Some)
+            .map_err(|_| format!("{} is too large", name)),
+        None => Ok(None),
+    }
+}
+
 fn parse_compaction_mode(value: Option<&str>) -> Result<Option<CompactionMode>, String> {
     match value {
         Some("reencode") => Ok(Some(CompactionMode::Reencode)),
@@ -42,6 +52,7 @@ pub fn lance_optimize_impl(
     defer_index_remap: bool,
     compaction_mode: Option<&str>,
     max_source_fragments: Option<i64>,
+    io_buffer_size: Option<i64>,
     server_name: Option<&str>,
 ) -> Result<(i64, i64, i64, i64, i64), String> {
     let start = Instant::now();
@@ -65,6 +76,7 @@ pub fn lance_optimize_impl(
     options.defer_index_remap = defer_index_remap;
     options.compaction_mode = parse_compaction_mode(compaction_mode)?;
     options.max_source_fragments = optional_usize(max_source_fragments, "max_source_fragments")?;
+    options.io_buffer_size = optional_u64(io_buffer_size, "io_buffer_size")?;
 
     let rt = Runtime::new().map_err(|e| format!("failed to create tokio runtime: {}", e))?;
 

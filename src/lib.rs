@@ -489,6 +489,7 @@ fn lance_optimize(
     defer_index_remap: default!(bool, "false"),
     compaction_mode: default!(Option<&str>, "NULL"),
     max_source_fragments: default!(Option<i64>, "NULL"),
+    io_buffer_size: default!(Option<i64>, "NULL"),
     server_name: default!(Option<&str>, "NULL"),
 ) -> TableIterator<
     'static,
@@ -513,6 +514,7 @@ fn lance_optimize(
             defer_index_remap,
             compaction_mode,
             max_source_fragments,
+            io_buffer_size,
             server_name,
         )
         .unwrap_or_else(|e| pgrx::error!("lance_optimize failed: {}", e));
