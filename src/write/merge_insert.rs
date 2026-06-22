@@ -39,99 +39,100 @@ pub fn lance_merge_insert_impl(
     let mut dataset: Option<Arc<Dataset>> = None;
     let mut chunk_txns: i64 = 0;
 
-    let total_rows = for_each_spi_chunk(source_query, batch_size, chunk_rows, |schema, batches| {
-        if batches.is_empty() {
-            return Ok(());
-        }
-
-        if dataset.is_none() {
-            let ds = rt.block_on(open_dataset(uri, server_name))?;
-
-            // Validate on_columns exist in both the source and Lance schemas.
-            for col in &on_columns {
-                if schema.column_with_name(col).is_none() {
-                    return Err(format!(
-                        "on_column '{}' not found in source query result (columns: {})",
-                        col,
-                        schema
-                            .fields()
-                            .iter()
-                            .map(|f| f.name().as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ));
-                }
-            }
-            let lance_field_names: Vec<String> =
-                ds.schema().fields.iter().map(|f| f.name.clone()).collect();
-            for col in &on_columns {
-                if !lance_field_names.contains(col) {
-                    return Err(format!(
-                        "on_column '{}' not found in Lance schema (columns: {})",
-                        col,
-                        lance_field_names.join(", ")
-                    ));
-                }
+    let total_rows =
+        for_each_spi_chunk(source_query, batch_size, chunk_rows, |schema, batches| {
+            if batches.is_empty() {
+                return Ok(());
             }
 
-            dataset = Some(Arc::new(ds));
-        }
+            if dataset.is_none() {
+                let ds = rt.block_on(open_dataset(uri, server_name))?;
 
-        let current = dataset.take().expect("dataset initialized on first chunk");
-
-        let new_dataset = rt.block_on(async {
-            let reader = arrow::record_batch::RecordBatchIterator::new(
-                batches.into_iter().map(Ok),
-                schema.clone(),
-            );
-
-            let mut builder = MergeInsertBuilder::try_new(current, on_columns.clone())
-                .map_err(|e| format!("MergeInsertBuilder::try_new failed: {}", e))?;
-
-            match when_matched {
-                "update" => {
-                    builder.when_matched(WhenMatched::UpdateAll);
+                // Validate on_columns exist in both the source and Lance schemas.
+                for col in &on_columns {
+                    if schema.column_with_name(col).is_none() {
+                        return Err(format!(
+                            "on_column '{}' not found in source query result (columns: {})",
+                            col,
+                            schema
+                                .fields()
+                                .iter()
+                                .map(|f| f.name().as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ));
+                    }
                 }
-                "nothing" => {
-                    builder.when_matched(WhenMatched::DoNothing);
+                let lance_field_names: Vec<String> =
+                    ds.schema().fields.iter().map(|f| f.name.clone()).collect();
+                for col in &on_columns {
+                    if !lance_field_names.contains(col) {
+                        return Err(format!(
+                            "on_column '{}' not found in Lance schema (columns: {})",
+                            col,
+                            lance_field_names.join(", ")
+                        ));
+                    }
                 }
-                _ => {
-                    return Err(format!(
-                        "invalid when_matched value '{}': must be 'update' or 'nothing'",
-                        when_matched
-                    ));
-                }
+
+                dataset = Some(Arc::new(ds));
             }
 
-            match when_not_matched {
-                "insert" => {
-                    builder.when_not_matched(WhenNotMatched::InsertAll);
-                }
-                "nothing" => {
-                    builder.when_not_matched(WhenNotMatched::DoNothing);
-                }
-                _ => {
-                    return Err(format!(
-                        "invalid when_not_matched value '{}': must be 'insert' or 'nothing'",
-                        when_not_matched
-                    ));
-                }
-            }
+            let current = dataset.take().expect("dataset initialized on first chunk");
 
-            let (ds, _stats) = builder
-                .try_build()
-                .map_err(|e| format!("merge_insert try_build failed: {}", e))?
-                .execute_reader(reader)
-                .await
-                .map_err(|e| format!("lance merge_insert failed: {}", e))?;
+            let new_dataset = rt.block_on(async {
+                let reader = arrow::record_batch::RecordBatchIterator::new(
+                    batches.into_iter().map(Ok),
+                    schema.clone(),
+                );
 
-            Ok(ds)
+                let mut builder = MergeInsertBuilder::try_new(current, on_columns.clone())
+                    .map_err(|e| format!("MergeInsertBuilder::try_new failed: {}", e))?;
+
+                match when_matched {
+                    "update" => {
+                        builder.when_matched(WhenMatched::UpdateAll);
+                    }
+                    "nothing" => {
+                        builder.when_matched(WhenMatched::DoNothing);
+                    }
+                    _ => {
+                        return Err(format!(
+                            "invalid when_matched value '{}': must be 'update' or 'nothing'",
+                            when_matched
+                        ));
+                    }
+                }
+
+                match when_not_matched {
+                    "insert" => {
+                        builder.when_not_matched(WhenNotMatched::InsertAll);
+                    }
+                    "nothing" => {
+                        builder.when_not_matched(WhenNotMatched::DoNothing);
+                    }
+                    _ => {
+                        return Err(format!(
+                            "invalid when_not_matched value '{}': must be 'insert' or 'nothing'",
+                            when_not_matched
+                        ));
+                    }
+                }
+
+                let (ds, _stats) = builder
+                    .try_build()
+                    .map_err(|e| format!("merge_insert try_build failed: {}", e))?
+                    .execute_reader(reader)
+                    .await
+                    .map_err(|e| format!("lance merge_insert failed: {}", e))?;
+
+                Ok(ds)
+            })?;
+
+            dataset = Some(new_dataset);
+            chunk_txns += 1;
+            Ok(())
         })?;
-
-        dataset = Some(new_dataset);
-        chunk_txns += 1;
-        Ok(())
-    })?;
 
     let duration_ms = start.elapsed().as_millis() as i64;
     let chunk_rows_i64 = chunk_rows as i64;

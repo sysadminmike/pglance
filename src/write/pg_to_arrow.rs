@@ -133,11 +133,9 @@ impl TypedBuilder {
                 varlen_capacity,
             ))),
             DataType::Date32 => Ok(Self::Date32(Date32Builder::with_capacity(capacity))),
-            DataType::Timestamp(TimeUnit::Microsecond, None) => {
-                Ok(Self::TimestampMicro(
-                    TimestampMicrosecondBuilder::with_capacity(capacity),
-                ))
-            }
+            DataType::Timestamp(TimeUnit::Microsecond, None) => Ok(Self::TimestampMicro(
+                TimestampMicrosecondBuilder::with_capacity(capacity),
+            )),
             DataType::Timestamp(TimeUnit::Microsecond, Some(_)) => Ok(Self::TimestampMicroUtc(
                 TimestampMicrosecondBuilder::with_capacity(capacity).with_timezone("UTC"),
             )),
@@ -346,10 +344,11 @@ fn convert_spi_rows(
     let mut buffered_bytes: usize = 0;
     let mut batches = Vec::new();
     let mut total_rows: u64 = 0;
+    let builder_capacity = batch_size.min(tuptable.len()).max(1);
 
     let mut builders: Vec<TypedBuilder> = cols
         .iter()
-        .map(|c| TypedBuilder::new(&c.arrow_type, batch_size))
+        .map(|c| TypedBuilder::new(&c.arrow_type, builder_capacity))
         .collect::<Result<Vec<_>, _>>()?;
     let mut rows_in_batch: usize = 0;
 
@@ -363,8 +362,7 @@ fn convert_spi_rows(
         total_rows += 1;
 
         if rows_in_batch >= batch_size {
-            let arrays: Vec<Arc<dyn Array>> =
-                builders.iter_mut().map(|b| b.finish()).collect();
+            let arrays: Vec<Arc<dyn Array>> = builders.iter_mut().map(|b| b.finish()).collect();
             let batch = RecordBatch::try_new(schema.clone(), arrays)
                 .map_err(|e| format!("failed to create RecordBatch: {}", e))?;
             buffered_bytes += batch
@@ -399,6 +397,23 @@ fn convert_spi_rows(
         let arrays: Vec<Arc<dyn Array>> = builders.iter_mut().map(|b| b.finish()).collect();
         let batch = RecordBatch::try_new(schema.clone(), arrays)
             .map_err(|e| format!("failed to create RecordBatch: {}", e))?;
+        buffered_bytes += batch
+            .columns()
+            .iter()
+            .map(|a| a.get_array_memory_size())
+            .sum::<usize>();
+
+        if max_buffer_bytes > 0 && buffered_bytes > max_buffer_bytes {
+            return Err(format!(
+                "source chunk exceeds lance.max_write_buffer_mb limit ({} MB): buffered \
+                 ~{} MB before completing. Aborting to avoid an out-of-memory crash. Lower \
+                 lance.write_chunk_rows, or raise lance.max_write_buffer_mb \
+                 (e.g. SET lance.max_write_buffer_mb = ...).",
+                max_buffer_bytes / (1024 * 1024),
+                buffered_bytes / (1024 * 1024),
+            ));
+        }
+
         batches.push(batch);
     }
 

@@ -140,22 +140,20 @@ fn lance_build_info() -> TableIterator<
         name!(rustc_version, Option<String>),
     ),
 > {
-    TableIterator::new(vec![
-        (
-            "lance".to_string(),
-            env!("CARGO_PKG_VERSION").to_string(),
-            optional_build_value(env!("PGLANCE_GIT_REVISION")),
-            optional_build_value(env!("PGLANCE_DEP_LANCE_VERSION")),
-            optional_build_value(env!("PGLANCE_DEP_LANCE_REVISION")),
-            optional_build_value(env!("PGLANCE_DEP_LANCE_SOURCE")),
-            optional_build_value(env!("PGLANCE_DEP_LANCE_INDEX_VERSION")),
-            optional_build_value(env!("PGLANCE_DEP_LANCE_NAMESPACE_VERSION")),
-            optional_build_value(env!("PGLANCE_DEP_LANCE_NAMESPACE_IMPLS_VERSION")),
-            pg_feature().to_string(),
-            optional_build_value(env!("PGLANCE_BUILD_PROFILE")),
-            optional_build_value(env!("PGLANCE_RUSTC_VERSION")),
-        ),
-    ])
+    TableIterator::new(vec![(
+        "lance".to_string(),
+        env!("CARGO_PKG_VERSION").to_string(),
+        optional_build_value(env!("PGLANCE_GIT_REVISION")),
+        optional_build_value(env!("PGLANCE_DEP_LANCE_VERSION")),
+        optional_build_value(env!("PGLANCE_DEP_LANCE_REVISION")),
+        optional_build_value(env!("PGLANCE_DEP_LANCE_SOURCE")),
+        optional_build_value(env!("PGLANCE_DEP_LANCE_INDEX_VERSION")),
+        optional_build_value(env!("PGLANCE_DEP_LANCE_NAMESPACE_VERSION")),
+        optional_build_value(env!("PGLANCE_DEP_LANCE_NAMESPACE_IMPLS_VERSION")),
+        pg_feature().to_string(),
+        optional_build_value(env!("PGLANCE_BUILD_PROFILE")),
+        optional_build_value(env!("PGLANCE_RUSTC_VERSION")),
+    )])
 }
 
 pgrx::extension_sql!(
@@ -551,14 +549,9 @@ fn lance_fts_search_count(
         name!(duration_ms, i64),
     ),
 > {
-    let row = write::index::lance_fts_search_count_impl(
-        uri,
-        column_name,
-        query_text,
-        limit,
-        server_name,
-    )
-    .unwrap_or_else(|e| pgrx::error!("lance_fts_search_count failed: {}", e));
+    let row =
+        write::index::lance_fts_search_count_impl(uri, column_name, query_text, limit, server_name)
+            .unwrap_or_else(|e| pgrx::error!("lance_fts_search_count failed: {}", e));
 
     TableIterator::new(vec![row])
 }

@@ -42,58 +42,59 @@ pub fn lance_append_impl(
 
     let mut first = true;
 
-    let total_rows = for_each_spi_chunk(source_query, batch_size, chunk_rows, |schema, batches| {
-        if batches.is_empty() {
-            return Ok(());
-        }
-
-        // First chunk honors the requested mode; later chunks always append to it.
-        let write_mode = if first {
-            match mode {
-                "create" => WriteMode::Create,
-                "overwrite" => WriteMode::Overwrite,
-                _ => WriteMode::Append,
-            }
-        } else {
-            WriteMode::Append
-        };
-
-        rt.block_on(async {
-            // For an append into a pre-existing dataset, verify it exists up front
-            // so we surface a clear error (matching prior behavior).
-            if first && mode == "append" {
-                open_dataset(uri, server_name).await?;
+    let total_rows =
+        for_each_spi_chunk(source_query, batch_size, chunk_rows, |schema, batches| {
+            if batches.is_empty() {
+                return Ok(());
             }
 
-            let mut params = lance_rs::dataset::WriteParams {
-                mode: write_mode,
-                ..Default::default()
+            // First chunk honors the requested mode; later chunks always append to it.
+            let write_mode = if first {
+                match mode {
+                    "create" => WriteMode::Create,
+                    "overwrite" => WriteMode::Overwrite,
+                    _ => WriteMode::Append,
+                }
+            } else {
+                WriteMode::Append
             };
 
-            if !storage_opts.is_empty() {
-                params.store_params = Some(ObjectStoreParams {
-                    storage_options_accessor: Some(Arc::new(
-                        StorageOptionsAccessor::with_static_options(storage_opts.clone()),
-                    )),
+            rt.block_on(async {
+                // For an append into a pre-existing dataset, verify it exists up front
+                // so we surface a clear error (matching prior behavior).
+                if first && mode == "append" {
+                    open_dataset(uri, server_name).await?;
+                }
+
+                let mut params = lance_rs::dataset::WriteParams {
+                    mode: write_mode,
                     ..Default::default()
-                });
-            }
+                };
 
-            let reader = arrow::record_batch::RecordBatchIterator::new(
-                batches.into_iter().map(Ok),
-                schema.clone(),
-            );
+                if !storage_opts.is_empty() {
+                    params.store_params = Some(ObjectStoreParams {
+                        storage_options_accessor: Some(Arc::new(
+                            StorageOptionsAccessor::with_static_options(storage_opts.clone()),
+                        )),
+                        ..Default::default()
+                    });
+                }
 
-            Dataset::write(reader, uri, Some(params))
-                .await
-                .map_err(|e| format!("lance write failed: {}", e))?;
+                let reader = arrow::record_batch::RecordBatchIterator::new(
+                    batches.into_iter().map(Ok),
+                    schema.clone(),
+                );
 
-            Ok::<_, String>(())
+                Dataset::write(reader, uri, Some(params))
+                    .await
+                    .map_err(|e| format!("lance write failed: {}", e))?;
+
+                Ok::<_, String>(())
+            })?;
+
+            first = false;
+            Ok(())
         })?;
-
-        first = false;
-        Ok(())
-    })?;
 
     let duration_ms = start.elapsed().as_millis() as i64;
     Ok((total_rows as i64, duration_ms))
