@@ -70,6 +70,94 @@ pub fn write_chunk_rows() -> usize {
     }
 }
 
+fn optional_build_value(value: &'static str) -> Option<String> {
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+fn pg_feature() -> &'static str {
+    #[cfg(feature = "pg17")]
+    {
+        "pg17"
+    }
+    #[cfg(all(not(feature = "pg17"), feature = "pg16"))]
+    {
+        "pg16"
+    }
+    #[cfg(all(not(feature = "pg17"), not(feature = "pg16"), feature = "pg15"))]
+    {
+        "pg15"
+    }
+    #[cfg(all(
+        not(feature = "pg17"),
+        not(feature = "pg16"),
+        not(feature = "pg15"),
+        feature = "pg14"
+    ))]
+    {
+        "pg14"
+    }
+    #[cfg(all(
+        not(feature = "pg17"),
+        not(feature = "pg16"),
+        not(feature = "pg15"),
+        not(feature = "pg14"),
+        feature = "pg13"
+    ))]
+    {
+        "pg13"
+    }
+    #[cfg(not(any(
+        feature = "pg17",
+        feature = "pg16",
+        feature = "pg15",
+        feature = "pg14",
+        feature = "pg13"
+    )))]
+    {
+        "unknown"
+    }
+}
+
+#[pg_extern]
+fn lance_build_info() -> TableIterator<
+    'static,
+    (
+        name!(extension_name, String),
+        name!(pglance_version, String),
+        name!(pglance_git_revision, Option<String>),
+        name!(lance_version, Option<String>),
+        name!(lance_git_revision, Option<String>),
+        name!(lance_source, Option<String>),
+        name!(lance_index_version, Option<String>),
+        name!(lance_namespace_version, Option<String>),
+        name!(lance_namespace_impls_version, Option<String>),
+        name!(pg_feature, String),
+        name!(build_profile, Option<String>),
+        name!(rustc_version, Option<String>),
+    ),
+> {
+    TableIterator::new(vec![
+        (
+            "lance".to_string(),
+            env!("CARGO_PKG_VERSION").to_string(),
+            optional_build_value(env!("PGLANCE_GIT_REVISION")),
+            optional_build_value(env!("PGLANCE_DEP_LANCE_VERSION")),
+            optional_build_value(env!("PGLANCE_DEP_LANCE_REVISION")),
+            optional_build_value(env!("PGLANCE_DEP_LANCE_SOURCE")),
+            optional_build_value(env!("PGLANCE_DEP_LANCE_INDEX_VERSION")),
+            optional_build_value(env!("PGLANCE_DEP_LANCE_NAMESPACE_VERSION")),
+            optional_build_value(env!("PGLANCE_DEP_LANCE_NAMESPACE_IMPLS_VERSION")),
+            pg_feature().to_string(),
+            optional_build_value(env!("PGLANCE_BUILD_PROFILE")),
+            optional_build_value(env!("PGLANCE_RUSTC_VERSION")),
+        ),
+    ])
+}
+
 pgrx::extension_sql!(
     r#"
 CREATE FOREIGN DATA WRAPPER lance_fdw

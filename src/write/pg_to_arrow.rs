@@ -115,22 +115,31 @@ enum TypedBuilder {
 }
 
 impl TypedBuilder {
-    fn new(dt: &DataType) -> Result<Self, String> {
+    fn new(dt: &DataType, capacity: usize) -> Result<Self, String> {
+        let varlen_capacity = capacity.saturating_mul(64).min(8 * 1024 * 1024);
         match dt {
-            DataType::Boolean => Ok(Self::Boolean(BooleanBuilder::new())),
-            DataType::Int16 => Ok(Self::Int16(Int16Builder::new())),
-            DataType::Int32 => Ok(Self::Int32(Int32Builder::new())),
-            DataType::Int64 => Ok(Self::Int64(Int64Builder::new())),
-            DataType::Float32 => Ok(Self::Float32(Float32Builder::new())),
-            DataType::Float64 => Ok(Self::Float64(Float64Builder::new())),
-            DataType::Utf8 => Ok(Self::Utf8(StringBuilder::new())),
-            DataType::Binary => Ok(Self::Binary(BinaryBuilder::new())),
-            DataType::Date32 => Ok(Self::Date32(Date32Builder::new())),
+            DataType::Boolean => Ok(Self::Boolean(BooleanBuilder::with_capacity(capacity))),
+            DataType::Int16 => Ok(Self::Int16(Int16Builder::with_capacity(capacity))),
+            DataType::Int32 => Ok(Self::Int32(Int32Builder::with_capacity(capacity))),
+            DataType::Int64 => Ok(Self::Int64(Int64Builder::with_capacity(capacity))),
+            DataType::Float32 => Ok(Self::Float32(Float32Builder::with_capacity(capacity))),
+            DataType::Float64 => Ok(Self::Float64(Float64Builder::with_capacity(capacity))),
+            DataType::Utf8 => Ok(Self::Utf8(StringBuilder::with_capacity(
+                capacity,
+                varlen_capacity,
+            ))),
+            DataType::Binary => Ok(Self::Binary(BinaryBuilder::with_capacity(
+                capacity,
+                varlen_capacity,
+            ))),
+            DataType::Date32 => Ok(Self::Date32(Date32Builder::with_capacity(capacity))),
             DataType::Timestamp(TimeUnit::Microsecond, None) => {
-                Ok(Self::TimestampMicro(TimestampMicrosecondBuilder::new()))
+                Ok(Self::TimestampMicro(
+                    TimestampMicrosecondBuilder::with_capacity(capacity),
+                ))
             }
             DataType::Timestamp(TimeUnit::Microsecond, Some(_)) => Ok(Self::TimestampMicroUtc(
-                TimestampMicrosecondBuilder::new().with_timezone("UTC"),
+                TimestampMicrosecondBuilder::with_capacity(capacity).with_timezone("UTC"),
             )),
             _ => Err(format!("unsupported Arrow type for builder: {:?}", dt)),
         }
@@ -340,7 +349,7 @@ fn convert_spi_rows(
 
     let mut builders: Vec<TypedBuilder> = cols
         .iter()
-        .map(|c| TypedBuilder::new(&c.arrow_type))
+        .map(|c| TypedBuilder::new(&c.arrow_type, batch_size))
         .collect::<Result<Vec<_>, _>>()?;
     let mut rows_in_batch: usize = 0;
 
@@ -379,7 +388,7 @@ fn convert_spi_rows(
             // Reset builders for the next batch.
             builders = cols
                 .iter()
-                .map(|c| TypedBuilder::new(&c.arrow_type))
+                .map(|c| TypedBuilder::new(&c.arrow_type, batch_size))
                 .collect::<Result<Vec<_>, _>>()?;
             rows_in_batch = 0;
         }

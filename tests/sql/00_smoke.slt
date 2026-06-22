@@ -1,5 +1,11 @@
 # Basic smoke test for lance FDW.
 
+query TT
+SELECT extension_name = 'lance', pglance_version = '0.0.0'
+FROM lance_build_info();
+----
+t t
+
 statement ok
 SELECT lance_import('${SERVER}', '${SCHEMA}', 't_fdw', '${LANCE_URI}', batch_size => NULL);
 
