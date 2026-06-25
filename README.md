@@ -174,16 +174,18 @@ Chunk diagnostics are also returned:
 `lance_append` and `lance_merge_insert` stream their `source_query` through a
 server-side cursor in chunks instead of buffering the entire result set in
 memory. This keeps very large operations (millions of rows) from exhausting RAM
-and triggering the Linux OOM killer. Two GUCs control the behaviour:
+and triggering the Linux OOM killer. These GUCs control the behaviour:
 
 | GUC | Default | Purpose |
 |---|---|---|
 | `lance.write_chunk_rows` | `100000` | Source rows fetched and processed per chunk. Lower it to reduce peak memory; set to `0` to process the whole source in a single pass. |
 | `lance.max_write_buffer_mb` | `2048` | Hard ceiling on the in-memory Arrow buffer for a chunk. If a chunk exceeds it, the operation aborts cleanly (rolling back the transaction) instead of being OOM-killed. Set to `0` to disable the guard. |
+| `lance.merge_use_index` | `true` | Allow Lance merge-insert to use scalar indexes on join keys. Set to `false` to force Lance's full-scan merge path while keeping dataset indexes in place. |
 
 ```sql
 SET lance.write_chunk_rows = 50000;    -- smaller chunks = lower peak memory
 SET lance.max_write_buffer_mb = 2048;  -- abort cleanly rather than OOM
+SET lance.merge_use_index = false;     -- work around indexed merge issues
 ```
 
 > **Atomicity caveat:** `lance_merge_insert` performs one Lance commit per chunk,

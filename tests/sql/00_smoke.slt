@@ -6,6 +6,22 @@ FROM lance_build_info();
 ----
 t t
 
+query T
+SHOW lance.merge_use_index;
+----
+on
+
+statement ok
+SET lance.merge_use_index = false;
+
+query T
+SHOW lance.merge_use_index;
+----
+off
+
+statement ok
+RESET lance.merge_use_index;
+
 statement ok
 SELECT lance_import('${SERVER}', '${SCHEMA}', 't_fdw', '${LANCE_URI}', batch_size => NULL);
 

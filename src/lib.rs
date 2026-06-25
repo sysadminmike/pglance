@@ -18,6 +18,11 @@ static MAX_WRITE_BUFFER_MB: GucSetting<i32> = GucSetting::<i32>::new(2048);
 /// (the entire source is processed in a single pass).
 static WRITE_CHUNK_ROWS: GucSetting<i32> = GucSetting::<i32>::new(100_000);
 
+/// Whether Lance merge-insert may use scalar indexes on the join keys.
+/// Disable this to force Lance's full-scan merge path when indexed merge hits
+/// upstream Lance bugs or memory pressure.
+static MERGE_USE_INDEX: GucSetting<bool> = GucSetting::<bool>::new(true);
+
 #[pg_guard]
 pub extern "C-unwind" fn _PG_init() {
     GucRegistry::define_int_guc(
@@ -48,6 +53,18 @@ pub extern "C-unwind" fn _PG_init() {
         GucContext::Userset,
         GucFlags::default(),
     );
+
+    GucRegistry::define_bool_guc(
+        "lance.merge_use_index",
+        "Allow Lance merge-insert to use scalar indexes on join keys.",
+        "When enabled, lance_merge_insert allows the Lance SDK to use scalar indexes on merge \
+         join keys when available. Disable this to force Lance's full-scan merge path, which is \
+         useful as a workaround for indexed merge-insert bugs or excessive indexed-join memory \
+         use.",
+        &MERGE_USE_INDEX,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
 }
 
 /// The configured write-buffer guard limit in bytes, or `0` when disabled.
@@ -68,6 +85,11 @@ pub fn write_chunk_rows() -> usize {
     } else {
         n as usize
     }
+}
+
+/// Whether Lance merge-insert may use scalar indexes on join keys.
+pub fn merge_use_index() -> bool {
+    MERGE_USE_INDEX.get()
 }
 
 fn optional_build_value(value: &'static str) -> Option<String> {

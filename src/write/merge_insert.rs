@@ -33,6 +33,7 @@ pub fn lance_merge_insert_impl(
 
     let rt = Runtime::new().map_err(|e| format!("failed to create tokio runtime: {}", e))?;
     let chunk_rows = crate::write_chunk_rows();
+    let merge_use_index = crate::merge_use_index();
 
     // The dataset is opened on the first chunk and replaced with the updated
     // dataset returned by each merge so the next chunk sees prior changes.
@@ -88,6 +89,10 @@ pub fn lance_merge_insert_impl(
 
                 let mut builder = MergeInsertBuilder::try_new(current, on_columns.clone())
                     .map_err(|e| format!("MergeInsertBuilder::try_new failed: {}", e))?;
+
+                if !merge_use_index {
+                    builder.use_index(false);
+                }
 
                 match when_matched {
                     "update" => {
