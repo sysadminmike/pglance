@@ -359,6 +359,64 @@ fn lance_merge_insert(
 }
 
 #[pg_extern]
+fn lance_merge_insert_with_schema(
+    uri: &str,
+    source_query: &str,
+    on_columns: Vec<String>,
+    column_types: JsonB,
+    when_matched: default!(&str, "'update'"),
+    when_not_matched: default!(&str, "'insert'"),
+    batch_size: default!(i32, "1024"),
+    server_name: default!(Option<&str>, "NULL"),
+) -> TableIterator<
+    'static,
+    (
+        name!(rows_merged, i64),
+        name!(rows_inserted, Option<i64>),
+        name!(rows_updated, Option<i64>),
+        name!(duration_ms, i64),
+        name!(chunk_txns, i64),
+        name!(chunk_rows, i64),
+    ),
+> {
+    let type_overrides = write::pg_to_arrow::parse_arrow_type_overrides(&column_types.0)
+        .unwrap_or_else(|e| pgrx::error!("invalid column_types: {}", e));
+
+    let (rows_merged, rows_inserted, rows_updated, duration_ms, chunk_txns, chunk_rows) =
+        write::merge_insert::lance_merge_insert_with_schema_impl(
+            uri,
+            source_query,
+            on_columns,
+            when_matched,
+            when_not_matched,
+            batch_size as usize,
+            server_name,
+            &type_overrides,
+        )
+        .unwrap_or_else(|e| pgrx::error!("lance_merge_insert_with_schema failed: {}", e));
+
+    let inserted = if rows_inserted < 0 {
+        None
+    } else {
+        Some(rows_inserted)
+    };
+    let updated = if rows_updated < 0 {
+        None
+    } else {
+        Some(rows_updated)
+    };
+
+    TableIterator::new(vec![(
+        rows_merged,
+        inserted,
+        updated,
+        duration_ms,
+        chunk_txns,
+        chunk_rows,
+    )])
+}
+
+#[pg_extern]
 fn lance_delete(
     uri: &str,
     predicate: &str,

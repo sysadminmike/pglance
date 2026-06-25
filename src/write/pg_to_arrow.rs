@@ -6,11 +6,52 @@ use arrow::array::{
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use pgrx::datum::{Date, Timestamp, TimestampWithTimeZone};
 use pgrx::pg_sys;
+use std::collections::BTreeMap;
 use std::os::raw::c_long;
 use std::sync::Arc;
 
 /// Epoch difference: Unix epoch (1970-01-01) to PostgreSQL epoch (2000-01-01) in seconds.
 const UNIX_TO_POSTGRES_EPOCH_SECS: i64 = 946_684_800;
+
+pub type ArrowTypeOverrides = BTreeMap<String, DataType>;
+
+pub fn parse_arrow_type_overrides(value: &serde_json::Value) -> Result<ArrowTypeOverrides, String> {
+    let object = value.as_object().ok_or_else(|| {
+        "column_types must be a JSON object mapping column names to Arrow type names".to_string()
+    })?;
+
+    let mut overrides = ArrowTypeOverrides::new();
+    for (column, ty) in object {
+        let type_name = ty
+            .as_str()
+            .ok_or_else(|| format!("column_types['{}'] must be a string", column))?;
+        overrides.insert(column.clone(), parse_arrow_type_name(type_name)?);
+    }
+    Ok(overrides)
+}
+
+fn parse_arrow_type_name(type_name: &str) -> Result<DataType, String> {
+    match type_name.to_ascii_lowercase().as_str() {
+        "bool" | "boolean" => Ok(DataType::Boolean),
+        "int2" | "int16" => Ok(DataType::Int16),
+        "int4" | "int32" => Ok(DataType::Int32),
+        "int8" | "int64" => Ok(DataType::Int64),
+        "float4" | "float32" => Ok(DataType::Float32),
+        "float8" | "float64" => Ok(DataType::Float64),
+        "text" | "utf8" | "json_text" | "jsonb_text" => Ok(DataType::Utf8),
+        "bytea" | "binary" => Ok(DataType::Binary),
+        "date32" | "date_days" => Ok(DataType::Date32),
+        "timestamp" | "timestamp_us" => Ok(DataType::Timestamp(TimeUnit::Microsecond, None)),
+        "timestamptz" | "timestamp_us_utc" => Ok(DataType::Timestamp(
+            TimeUnit::Microsecond,
+            Some("UTC".into()),
+        )),
+        other => Err(format!(
+            "unsupported Arrow type override '{}'; expected boolean, int2/int4/int8, float4/float8, text, binary, date32, timestamp_us, or timestamp_us_utc",
+            other
+        )),
+    }
+}
 
 /// Map a PostgreSQL type OID to the corresponding Arrow DataType.
 pub fn pg_oid_to_arrow_type(oid: pg_sys::Oid) -> Result<DataType, String> {
@@ -65,6 +106,22 @@ pub fn build_arrow_schema(columns: &[SpiColumnInfo]) -> Schema {
         .map(|c| Field::new(&c.name, c.arrow_type.clone(), true))
         .collect();
     Schema::new(fields)
+}
+
+pub fn apply_arrow_type_overrides(
+    columns: &mut [SpiColumnInfo],
+    overrides: &ArrowTypeOverrides,
+) -> Result<(), String> {
+    for (column, arrow_type) in overrides {
+        let Some(info) = columns.iter_mut().find(|info| info.name == *column) else {
+            return Err(format!(
+                "column_types override references column '{}' not present in source query",
+                column
+            ));
+        };
+        info.arrow_type = arrow_type.clone();
+    }
+    Ok(())
 }
 
 /// Extract column info from an SPI TupleTable's tuple descriptor.
@@ -278,46 +335,67 @@ unsafe fn append_datum(
         },
         TypedBuilder::Date32(b) => {
             match heap_tuple.get_datum_by_ordinal(col_index + 1) {
-                Ok(val) => match val.value::<Date>() {
-                    Ok(Some(date)) => {
-                        // to_unix_epoch_days returns days since 1970-01-01
-                        let days = date.to_unix_epoch_days();
-                        b.append_value(days);
-                    }
-                    Ok(None) => b.append_null(),
-                    Err(_) => b.append_null(),
+                Ok(val) => match pg_oid {
+                    pg_sys::INT4OID => match val.value::<i32>() {
+                        Ok(Some(days)) => b.append_value(days),
+                        Ok(None) => b.append_null(),
+                        Err(_) => b.append_null(),
+                    },
+                    _ => match val.value::<Date>() {
+                        Ok(Some(date)) => {
+                            // to_unix_epoch_days returns days since 1970-01-01
+                            let days = date.to_unix_epoch_days();
+                            b.append_value(days);
+                        }
+                        Ok(None) => b.append_null(),
+                        Err(_) => b.append_null(),
+                    },
                 },
                 Err(_) => b.append_null(),
             }
         }
         TypedBuilder::TimestampMicro(b) => {
             match heap_tuple.get_datum_by_ordinal(col_index + 1) {
-                Ok(val) => match val.value::<Timestamp>() {
-                    Ok(Some(ts)) => {
-                        // pgrx Timestamp is microseconds since PG epoch (2000-01-01)
-                        // Arrow Timestamp(Microsecond, None) is microseconds since Unix epoch
-                        let pg_micros: i64 = ts.into();
-                        let unix_micros =
-                            pg_micros + UNIX_TO_POSTGRES_EPOCH_SECS.saturating_mul(1_000_000);
-                        b.append_value(unix_micros);
-                    }
-                    Ok(None) => b.append_null(),
-                    Err(_) => b.append_null(),
+                Ok(val) => match pg_oid {
+                    pg_sys::INT8OID => match val.value::<i64>() {
+                        Ok(Some(unix_micros)) => b.append_value(unix_micros),
+                        Ok(None) => b.append_null(),
+                        Err(_) => b.append_null(),
+                    },
+                    _ => match val.value::<Timestamp>() {
+                        Ok(Some(ts)) => {
+                            // pgrx Timestamp is microseconds since PG epoch (2000-01-01)
+                            // Arrow Timestamp(Microsecond, None) is microseconds since Unix epoch
+                            let pg_micros: i64 = ts.into();
+                            let unix_micros =
+                                pg_micros + UNIX_TO_POSTGRES_EPOCH_SECS.saturating_mul(1_000_000);
+                            b.append_value(unix_micros);
+                        }
+                        Ok(None) => b.append_null(),
+                        Err(_) => b.append_null(),
+                    },
                 },
                 Err(_) => b.append_null(),
             }
         }
         TypedBuilder::TimestampMicroUtc(b) => {
             match heap_tuple.get_datum_by_ordinal(col_index + 1) {
-                Ok(val) => match val.value::<TimestampWithTimeZone>() {
-                    Ok(Some(ts)) => {
-                        let pg_micros: i64 = ts.into();
-                        let unix_micros =
-                            pg_micros + UNIX_TO_POSTGRES_EPOCH_SECS.saturating_mul(1_000_000);
-                        b.append_value(unix_micros);
-                    }
-                    Ok(None) => b.append_null(),
-                    Err(_) => b.append_null(),
+                Ok(val) => match pg_oid {
+                    pg_sys::INT8OID => match val.value::<i64>() {
+                        Ok(Some(unix_micros)) => b.append_value(unix_micros),
+                        Ok(None) => b.append_null(),
+                        Err(_) => b.append_null(),
+                    },
+                    _ => match val.value::<TimestampWithTimeZone>() {
+                        Ok(Some(ts)) => {
+                            let pg_micros: i64 = ts.into();
+                            let unix_micros =
+                                pg_micros + UNIX_TO_POSTGRES_EPOCH_SECS.saturating_mul(1_000_000);
+                            b.append_value(unix_micros);
+                        }
+                        Ok(None) => b.append_null(),
+                        Err(_) => b.append_null(),
+                    },
                 },
                 Err(_) => b.append_null(),
             }
@@ -433,6 +511,19 @@ pub fn for_each_spi_chunk<F>(
     source_query: &str,
     batch_size: usize,
     chunk_rows: usize,
+    handle: F,
+) -> Result<u64, String>
+where
+    F: FnMut(&Arc<Schema>, Vec<RecordBatch>) -> Result<(), String>,
+{
+    for_each_spi_chunk_with_type_overrides(source_query, batch_size, chunk_rows, None, handle)
+}
+
+pub fn for_each_spi_chunk_with_type_overrides<F>(
+    source_query: &str,
+    batch_size: usize,
+    chunk_rows: usize,
+    type_overrides: Option<&ArrowTypeOverrides>,
     mut handle: F,
 ) -> Result<u64, String>
 where
@@ -460,7 +551,10 @@ where
 
             // Derive column metadata once from the first non-empty fetch.
             if schema_cols.is_none() {
-                let cols = unsafe { extract_spi_columns(&tuptable)? };
+                let mut cols = unsafe { extract_spi_columns(&tuptable)? };
+                if let Some(overrides) = type_overrides {
+                    apply_arrow_type_overrides(&mut cols, overrides)?;
+                }
                 let arrow_schema = Arc::new(build_arrow_schema(&cols));
                 schema_cols = Some((arrow_schema, cols));
             }

@@ -1,4 +1,6 @@
-use crate::write::pg_to_arrow::for_each_spi_chunk;
+use crate::write::pg_to_arrow::{
+    for_each_spi_chunk, for_each_spi_chunk_with_type_overrides, ArrowTypeOverrides,
+};
 use crate::write::storage::open_dataset;
 use lance_rs::dataset::{MergeInsertBuilder, WhenMatched, WhenNotMatched};
 use lance_rs::Dataset;
@@ -25,6 +27,51 @@ pub fn lance_merge_insert_impl(
     batch_size: usize,
     server_name: Option<&str>,
 ) -> Result<(i64, i64, i64, i64, i64, i64), String> {
+    lance_merge_insert_impl_inner(
+        uri,
+        source_query,
+        on_columns,
+        when_matched,
+        when_not_matched,
+        batch_size,
+        server_name,
+        None,
+    )
+}
+
+pub fn lance_merge_insert_with_schema_impl(
+    uri: &str,
+    source_query: &str,
+    on_columns: Vec<String>,
+    when_matched: &str,
+    when_not_matched: &str,
+    batch_size: usize,
+    server_name: Option<&str>,
+    type_overrides: &ArrowTypeOverrides,
+) -> Result<(i64, i64, i64, i64, i64, i64), String> {
+    lance_merge_insert_impl_inner(
+        uri,
+        source_query,
+        on_columns,
+        when_matched,
+        when_not_matched,
+        batch_size,
+        server_name,
+        Some(type_overrides),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lance_merge_insert_impl_inner(
+    uri: &str,
+    source_query: &str,
+    on_columns: Vec<String>,
+    when_matched: &str,
+    when_not_matched: &str,
+    batch_size: usize,
+    server_name: Option<&str>,
+    type_overrides: Option<&ArrowTypeOverrides>,
+) -> Result<(i64, i64, i64, i64, i64, i64), String> {
     let start = Instant::now();
 
     if on_columns.is_empty() {
@@ -40,8 +87,8 @@ pub fn lance_merge_insert_impl(
     let mut dataset: Option<Arc<Dataset>> = None;
     let mut chunk_txns: i64 = 0;
 
-    let total_rows =
-        for_each_spi_chunk(source_query, batch_size, chunk_rows, |schema, batches| {
+    let mut handle_chunk =
+        |schema: &Arc<arrow::datatypes::Schema>, batches: Vec<arrow::record_batch::RecordBatch>| {
             if batches.is_empty() {
                 return Ok(());
             }
@@ -137,7 +184,19 @@ pub fn lance_merge_insert_impl(
             dataset = Some(new_dataset);
             chunk_txns += 1;
             Ok(())
-        })?;
+        };
+
+    let total_rows = if let Some(type_overrides) = type_overrides {
+        for_each_spi_chunk_with_type_overrides(
+            source_query,
+            batch_size,
+            chunk_rows,
+            Some(type_overrides),
+            &mut handle_chunk,
+        )?
+    } else {
+        for_each_spi_chunk(source_query, batch_size, chunk_rows, &mut handle_chunk)?
+    };
 
     let duration_ms = start.elapsed().as_millis() as i64;
     let chunk_rows_i64 = chunk_rows as i64;

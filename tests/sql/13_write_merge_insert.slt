@@ -86,6 +86,43 @@ SELECT name FROM t_merge_base WHERE id = 7;
 ----
 merged_7
 
+# ── Merge with schema overrides: source can provide Arrow-ready timestamp micros ──
+
+query II
+SELECT rows_written, (duration_ms >= 0) AS ok
+  FROM lance_append(
+    '${LANCE_WRITE_DIR}/t_merge_schema.lance',
+    'SELECT 1::int4 AS id, timestamptz ''2025-01-01 00:00:00+00'' AS observed, ''{"a":1}''::text AS payload',
+    mode := 'create'
+  );
+----
+1 t
+
+query IIIIII
+SELECT rows_merged,
+       rows_inserted IS NULL AS ins_null,
+       rows_updated IS NULL AS upd_null,
+       (duration_ms >= 0) AS time_ok,
+       (chunk_txns = 1) AS txns_ok,
+       (chunk_rows > 0) AS chunk_rows_ok
+  FROM lance_merge_insert_with_schema(
+    '${LANCE_WRITE_DIR}/t_merge_schema.lance',
+    'SELECT 1::int4 AS id, floor(extract(epoch from timestamptz ''2025-01-02 00:00:00+00'') * 1000000)::int8 AS observed, ''{"b":2}''::text AS payload',
+    ARRAY['id'],
+    '{"observed":"timestamp_us_utc","payload":"utf8"}'::jsonb,
+    batch_size := 10
+  );
+----
+1 t t t t t
+
+statement ok
+SELECT lance_import('${SERVER}', '${SCHEMA}', 't_merge_schema', '${LANCE_WRITE_DIR}/t_merge_schema.lance', batch_size => NULL);
+
+query TT
+SELECT observed IS NOT NULL, payload FROM t_merge_schema WHERE id = 1;
+----
+t {"b":2}
+
 # ── Merge with when_matched='nothing' — only inserts, no updates ──
 
 query II

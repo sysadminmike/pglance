@@ -169,6 +169,50 @@ Chunk diagnostics are also returned:
 
 > Note: The Lance SDK does not currently return separate insert/update counts, so `rows_inserted` and `rows_updated` may be NULL.
 
+#### Upsert with Arrow-ready source columns
+
+`lance_merge_insert_with_schema()` accepts a JSONB map of source column names to
+Arrow type overrides. This is useful when a source query pre-normalizes expensive
+types, for example by returning timestamps as Unix microseconds (`int8`) and JSON
+values as text.
+
+```sql
+SELECT * FROM lance_merge_insert_with_schema(
+    uri          := '/path/to/dataset.lance',
+    source_query := $query$
+        SELECT cdi::text,
+               floor(extract(epoch from observed) * 1000000)::int8 AS observed,
+               serviceid::int2,
+               payloadtypeid::int2,
+               floor(extract(epoch from received) * 1000000)::int8 AS received,
+               floor(extract(epoch from processed) * 1000000)::int8 AS processed,
+               semantictraceid::text,
+               counter::int4,
+               trace::text AS trace,
+               data::text AS data,
+               floor(extract(epoch from created) * 1000000)::int8 AS created,
+               floor(extract(epoch from updated) * 1000000)::int8 AS updated
+          FROM public.stage_event_2_valid_lance_merge
+         ORDER BY updated
+    $query$,
+    on_columns   := ARRAY['observed', 'cdi', 'serviceid', 'payloadtypeid'],
+    column_types := '{
+      "observed": "timestamp_us_utc",
+      "received": "timestamp_us_utc",
+      "processed": "timestamp_us_utc",
+      "created": "timestamp_us_utc",
+      "updated": "timestamp_us_utc",
+      "trace": "utf8",
+      "data": "utf8"
+    }'::jsonb,
+    batch_size   := 50000
+);
+```
+
+This still executes the source query through PostgreSQL SPI because pglance is a
+PostgreSQL extension, but it avoids pgrx timestamp/JSON datum conversion for the
+overridden columns. For completely bypassing SPI, use an external loader process.
+
 #### Memory safety for large writes and merges
 
 `lance_append` and `lance_merge_insert` stream their `source_query` through a
