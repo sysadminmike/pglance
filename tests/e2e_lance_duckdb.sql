@@ -789,6 +789,65 @@ SELECT * FROM duckdb.query($$SELECT sum(id) AS duckdb_sum FROM '/tmp/lance_e2e_t
 \echo '  PASS: large batch type fidelity'
 
 -- ─────────────────────────────────────────────────────────────────────────────
+-- 17. Merge-insert with schema overrides — timestamp micros + JSON text
+-- ─────────────────────────────────────────────────────────────────────────────
+\echo ''
+\echo '>>> 17. Merge-insert with schema overrides — timestamp micros + JSON text'
+
+DROP FOREIGN TABLE IF EXISTS le2e.t_schema_merge CASCADE;
+
+SELECT * FROM lance_append(
+  '/tmp/lance_e2e_test/t_schema_merge.lance',
+  $q$
+    SELECT v::int4 AS id,
+           ('customer_' || v::text)::text AS name,
+           ('customer_' || v::text || '@example.test')::text AS email,
+           ('2025-01-01 00:00:00+00'::timestamptz + (v || ' hours')::interval) AS created_at,
+           ('2025-01-02 00:00:00+00'::timestamptz + (v || ' hours')::interval) AS updated_at,
+           NULL::timestamptz AS deleted_at,
+           ('{"version":1,"id":' || v || '}')::text AS jsondata
+      FROM generate_series(1, 5) v
+  $q$,
+  mode := 'create'
+);
+
+SELECT * FROM lance_merge_insert_with_schema(
+  '/tmp/lance_e2e_test/t_schema_merge.lance',
+  $q$
+    SELECT v::int4 AS id,
+           ('customer_' || v::text || '_updated')::text AS name,
+           ('customer_' || v::text || '@example.test')::text AS email,
+           floor(extract(epoch from ('2025-01-01 00:00:00+00'::timestamptz + (v || ' hours')::interval)) * 1000000)::int8 AS created_at,
+           floor(extract(epoch from ('2025-01-10 00:00:00+00'::timestamptz + (v || ' hours')::interval)) * 1000000)::int8 AS updated_at,
+           CASE WHEN v = 2 THEN floor(extract(epoch from '2025-01-11 00:00:00+00'::timestamptz) * 1000000)::int8 ELSE NULL::int8 END AS deleted_at,
+           ('{"version":2,"id":' || v || '}')::text AS jsondata
+      FROM generate_series(2, 7) v
+  $q$,
+  on_columns := ARRAY['id'],
+  column_types := '{
+    "created_at": "timestamp_us_utc",
+    "updated_at": "timestamp_us_utc",
+    "deleted_at": "timestamp_us_utc",
+    "jsondata": "utf8"
+  }'::jsonb,
+  batch_size := 10
+);
+
+SELECT lance_import('lance_e2e', 'le2e', 't_schema_merge', '/tmp/lance_e2e_test/t_schema_merge.lance', batch_size => NULL);
+
+SELECT count(*) AS schema_merge_count FROM le2e.t_schema_merge;
+SELECT * FROM duckdb.query($$SELECT count(*) AS duck_schema_merge_count FROM '/tmp/lance_e2e_test/t_schema_merge.lance'$$);
+
+SELECT id, name, deleted_at IS NOT NULL AS is_deleted, jsondata
+  FROM le2e.t_schema_merge
+ WHERE id IN (1, 2, 7)
+ ORDER BY id;
+
+SELECT * FROM duckdb.query($$SELECT id, name, jsondata FROM '/tmp/lance_e2e_test/t_schema_merge.lance' WHERE id IN (1, 2, 7) ORDER BY id$$);
+
+\echo '  PASS: schema override merge-insert verified by Lance FDW and DuckDB'
+
+-- ─────────────────────────────────────────────────────────────────────────────
 -- Cleanup
 -- ─────────────────────────────────────────────────────────────────────────────
 \echo ''
@@ -802,6 +861,7 @@ DROP FOREIGN TABLE IF EXISTS le2e.t_integrity CASCADE;
 DROP FOREIGN TABLE IF EXISTS le2e.t_nulls CASCADE;
 DROP FOREIGN TABLE IF EXISTS le2e.t_empty CASCADE;
 DROP FOREIGN TABLE IF EXISTS le2e.t_large CASCADE;
+DROP FOREIGN TABLE IF EXISTS le2e.t_schema_merge CASCADE;
 DROP SCHEMA IF EXISTS le2e CASCADE;
 -- Note: we leave the lance_e2e server and extensions in place.
 -- To fully clean up, also run:

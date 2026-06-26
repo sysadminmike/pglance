@@ -178,40 +178,62 @@ values as text.
 
 ```sql
 SELECT * FROM lance_merge_insert_with_schema(
-    uri          := '/path/to/dataset.lance',
+    uri          := '/path/to/customers.lance',
     source_query := $query$
-        SELECT cdi::text,
-               floor(extract(epoch from observed) * 1000000)::int8 AS observed,
-               serviceid::int2,
-               payloadtypeid::int2,
-               floor(extract(epoch from received) * 1000000)::int8 AS received,
-               floor(extract(epoch from processed) * 1000000)::int8 AS processed,
-               semantictraceid::text,
-               counter::int4,
-               trace::text AS trace,
-               data::text AS data,
-               floor(extract(epoch from created) * 1000000)::int8 AS created,
-               floor(extract(epoch from updated) * 1000000)::int8 AS updated
-          FROM public.stage_event_2_valid_lance_merge
-         ORDER BY updated
+        SELECT id,
+               name,
+               email,
+               floor(extract(epoch from created_at) * 1000000)::int8 AS created_at,
+               floor(extract(epoch from updated_at) * 1000000)::int8 AS updated_at,
+               floor(extract(epoch from deleted_at) * 1000000)::int8 AS deleted_at,
+               jsondata::text AS jsondata
+          FROM staging.customers
+         ORDER BY updated_at
     $query$,
-    on_columns   := ARRAY['observed', 'cdi', 'serviceid', 'payloadtypeid'],
+    on_columns   := ARRAY['id'],
     column_types := '{
-      "observed": "timestamp_us_utc",
-      "received": "timestamp_us_utc",
-      "processed": "timestamp_us_utc",
-      "created": "timestamp_us_utc",
-      "updated": "timestamp_us_utc",
-      "trace": "utf8",
-      "data": "utf8"
+      "created_at": "timestamp_us_utc",
+      "updated_at": "timestamp_us_utc",
+      "deleted_at": "timestamp_us_utc",
+      "jsondata": "utf8"
     }'::jsonb,
-    batch_size   := 50000
+    when_matched     := 'update',
+    when_not_matched := 'insert',
+    batch_size       := 50000,
+    server_name      := NULL
 );
 ```
 
 This still executes the source query through PostgreSQL SPI because pglance is a
 PostgreSQL extension, but it avoids pgrx timestamp/JSON datum conversion for the
 overridden columns. For completely bypassing SPI, use an external loader process.
+
+#### Performance note: pglance vs an external loader
+
+PostgreSQL still reads every source row in both designs. The performance
+difference is how those rows cross into Rust and become Arrow batches.
+
+The pglance write path runs inside a PostgreSQL backend and reads query results
+through SPI. Each value is pulled from an SPI tuple and converted through pgrx's
+datum APIs before it is appended to Arrow builders. This is convenient and keeps
+the operation inside SQL, but it is a per-cell conversion path; wide rows with
+several timestamps and JSON/text fields can require millions of datum conversions
+per merge window.
+
+An external Rust loader uses PostgreSQL's normal client protocol over a local
+socket, asks SQL to pre-normalize expensive values (for example timestamps as
+Unix microseconds and JSON as text), and builds large Arrow batches in a normal
+Rust process before calling Lance directly. That avoids SPI and pgrx datum
+conversion overhead and can be significantly faster for large backfills or
+catch-up merges.
+
+pglance cannot use that same client-protocol path for the current query result
+without opening a second connection back to PostgreSQL, which would introduce a
+separate session, different snapshot/transaction semantics, authentication
+concerns, and possible lock/deadlock surprises. A faster in-extension path would
+need lower-level PostgreSQL tuple decoding instead of pgrx's generic SPI value
+conversion, but it would still be an in-backend execution model. For the largest
+merge workloads, an external loader remains the better hot path.
 
 #### Memory safety for large writes and merges
 
