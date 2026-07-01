@@ -11,6 +11,7 @@
 - Foreign Data Wrapper: `lance_fdw`
 - Auto schema discovery + DDL: `lance_import(server, schema, table, uri, batch_size => NULL)`
 - Namespace attach/sync: bulk-import entire Lance namespace trees
+- Direct column aggregates: `lance_min()` / `lance_max()` scan one Lance column without the FDW row-conversion path
 - Native-first type mapping:
   - Scalars map to native PostgreSQL scalar types where possible
   - `list<T>` maps to `T[]` when possible
@@ -99,6 +100,16 @@ helpers scan only the requested Lance column and keep values in Arrow form until
 the final scalar result is returned.
 
 ```sql
+SELECT *
+  FROM lance_max(
+    uri         := 's3://my-bucket/lakehouse/customers.lance',
+    column_name := 'updated_at',
+    server_name := 'lance_srv'
+  );
+--           value            |  data_type   | duration_ms
+-- --------------------------+--------------+-------------
+--  2026-06-30T18:42:11.123456Z | Timestamp(µs) |          91
+
 SELECT value::timestamptz AS latest_update
   FROM lance_max('s3://my-bucket/lakehouse/customers.lance', 'updated_at', 'lance_srv');
 
@@ -108,7 +119,13 @@ SELECT value::numeric AS smallest_balance
 
 `lance_min()` and `lance_max()` support integer, floating point, date,
 timestamp, and Arrow decimal128 columns. The result is returned as text together
-with the Lance/Arrow data type and execution duration.
+with the Lance/Arrow data type and execution duration, so callers can cast the
+scalar to the desired PostgreSQL type.
+
+This is much faster than a temp `lance_import()` plus `SELECT max(col)` for large
+datasets. The FDW query has to produce PostgreSQL rows and convert Arrow values
+into PostgreSQL datums before PostgreSQL can aggregate them; the helper projects
+only `column_name` and computes the result directly over Arrow arrays.
 
 ### 4) Attach and sync a Lance namespace
 
