@@ -1,0 +1,55 @@
+# Direct Lance column aggregate helpers avoid the FDW row-conversion path.
+
+query II
+SELECT rows_written, (duration_ms >= 0) AS ok
+  FROM lance_append(
+    '${LANCE_WRITE_DIR}/t_column_aggregates.lance',
+    $$SELECT * FROM (VALUES
+      (1::int4, 10::int8, 1.5::float8, '2025-01-01 00:00:00'::timestamp),
+      (2::int4, 20::int8, 3.5::float8, '2025-06-15 14:30:00'::timestamp),
+      (3::int4, NULL::int8, NULL::float8, NULL::timestamp)
+    ) AS t(id, amount, score, updated_at)$$,
+    mode := 'create'
+  );
+----
+3 t
+
+query T
+SELECT value FROM lance_min('${LANCE_WRITE_DIR}/t_column_aggregates.lance', 'id');
+----
+1
+
+query T
+SELECT value FROM lance_max('${LANCE_WRITE_DIR}/t_column_aggregates.lance', 'amount');
+----
+20
+
+query T
+SELECT value::float8::numeric(10,1)::text FROM lance_max('${LANCE_WRITE_DIR}/t_column_aggregates.lance', 'score');
+----
+3.5
+
+query T
+SELECT value::timestamp::text FROM lance_max('${LANCE_WRITE_DIR}/t_column_aggregates.lance', 'updated_at');
+----
+2025-06-15 14:30:00
+
+query TT
+SELECT data_type, (duration_ms >= 0)::text FROM lance_max('${LANCE_WRITE_DIR}/t_column_aggregates.lance', 'updated_at');
+----
+Timestamp(µs) true
+
+query II
+SELECT rows_written, (duration_ms >= 0) AS ok
+  FROM lance_append(
+    '${LANCE_WRITE_DIR}/t_column_aggregates_nulls.lance',
+    'SELECT NULL::int4 AS id FROM generate_series(1,3)',
+    mode := 'create'
+  );
+----
+3 t
+
+query T
+SELECT value IS NULL FROM lance_max('${LANCE_WRITE_DIR}/t_column_aggregates_nulls.lance', 'id');
+----
+t

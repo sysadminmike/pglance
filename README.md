@@ -93,6 +93,23 @@ SELECT count(*) FROM public.my_lance_table;
 SELECT * FROM public.my_lance_table LIMIT 10;
 ```
 
+For simple column aggregates, use the direct Lance helpers instead of importing
+the dataset as a foreign table and running PostgreSQL aggregates over it. These
+helpers scan only the requested Lance column and keep values in Arrow form until
+the final scalar result is returned.
+
+```sql
+SELECT value::timestamptz AS latest_update
+  FROM lance_max('s3://my-bucket/lakehouse/customers.lance', 'updated_at', 'lance_srv');
+
+SELECT value::numeric AS smallest_balance
+  FROM lance_min('/path/to/customers.lance', 'balance');
+```
+
+`lance_min()` and `lance_max()` support integer, floating point, date,
+timestamp, and Arrow decimal128 columns. The result is returned as text together
+with the Lance/Arrow data type and execution duration.
+
 ### 4) Attach and sync a Lance namespace
 
 ```sql
@@ -230,10 +247,10 @@ catch-up merges.
 pglance cannot use that same client-protocol path for the current query result
 without opening a second connection back to PostgreSQL, which would introduce a
 separate session, different snapshot/transaction semantics, authentication
-concerns, and possible lock/deadlock surprises. A faster in-extension path would
-need lower-level PostgreSQL tuple decoding instead of pgrx's generic SPI value
-conversion, but it would still be an in-backend execution model. For the largest
-merge workloads, an external loader remains the better hot path.
+concerns. A faster in-extension path would need lower-level PostgreSQL tuple
+decoding instead of pgrx's generic SPI value conversion, but it would still be
+an in-backend execution model. For the larger merge workloads, an external loader
+would be the better hot path.
 
 #### Memory safety for large writes and merges
 

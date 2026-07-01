@@ -1,3 +1,4 @@
+pub mod aggregate;
 pub mod append;
 pub mod delete;
 pub mod index;

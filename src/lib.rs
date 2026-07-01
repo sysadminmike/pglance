@@ -430,6 +430,44 @@ fn lance_delete(
 }
 
 #[pg_extern]
+fn lance_min(
+    uri: &str,
+    column_name: &str,
+    server_name: default!(Option<&str>, "NULL"),
+) -> TableIterator<
+    'static,
+    (
+        name!(value, Option<String>),
+        name!(data_type, String),
+        name!(duration_ms, i64),
+    ),
+> {
+    let row = write::aggregate::lance_min_impl(uri, column_name, server_name)
+        .unwrap_or_else(|e| pgrx::error!("lance_min failed: {}", e));
+
+    TableIterator::new(vec![row])
+}
+
+#[pg_extern]
+fn lance_max(
+    uri: &str,
+    column_name: &str,
+    server_name: default!(Option<&str>, "NULL"),
+) -> TableIterator<
+    'static,
+    (
+        name!(value, Option<String>),
+        name!(data_type, String),
+        name!(duration_ms, i64),
+    ),
+> {
+    let row = write::aggregate::lance_max_impl(uri, column_name, server_name)
+        .unwrap_or_else(|e| pgrx::error!("lance_max failed: {}", e));
+
+    TableIterator::new(vec![row])
+}
+
+#[pg_extern]
 fn lance_create_scalar_index(
     uri: &str,
     column_name: &str,
