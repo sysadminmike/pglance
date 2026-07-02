@@ -25,10 +25,10 @@ pg_test = ["tempfile", "sqllogictest"]
 
 [dependencies]
 pgrx = "=0.14.3"
-lance_rs = { package = "lance", git = "https://github.com/lance-format/lance", tag = "v8.0.0-rc.1" }
-lance-index = { git = "https://github.com/lance-format/lance", tag = "v8.0.0-rc.1" }
-lance-namespace = { git = "https://github.com/lance-format/lance", tag = "v8.0.0-rc.1" }
-lance-namespace-impls = { git = "https://github.com/lance-format/lance", tag = "v8.0.0-rc.1", features = ["rest"] }
+lance_rs = { package = "lance", git = "https://github.com/lance-format/lance", tag = "v8.0.0" }
+lance-index = { git = "https://github.com/lance-format/lance", tag = "v8.0.0" }
+lance-namespace = { git = "https://github.com/lance-format/lance", tag = "v8.0.0" }
+lance-namespace-impls = { git = "https://github.com/lance-format/lance", tag = "v8.0.0", features = ["rest"] }
 arrow = "58.0.0"
 arrow-schema = "58.0.0"
 tokio = { version = "1.0", features = ["rt-multi-thread", "macros"] }
@@ -37,6 +37,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = "0.4"
 base64 = "0.22"
+async-trait = "0.1"
 sqllogictest = { version = "=0.29.0", optional = true }
 
 [dev-dependencies]

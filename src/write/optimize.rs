@@ -1,7 +1,39 @@
 use crate::write::storage::open_dataset;
-use lance_rs::dataset::optimize::{compact_files, CompactionMode, CompactionOptions};
+use lance_rs::dataset::optimize::{
+    compact_files, compact_files_with_planner, CompactionMode, CompactionOptions, CompactionPlan,
+    CompactionPlanner, TaskData,
+};
+use lance_rs::Dataset;
 use std::time::Instant;
 use tokio::runtime::Runtime;
+
+#[derive(Debug)]
+struct RewriteAllPlanner {
+    options: CompactionOptions,
+}
+
+#[async_trait::async_trait]
+impl CompactionPlanner for RewriteAllPlanner {
+    async fn plan(&self, dataset: &Dataset) -> lance_rs::Result<CompactionPlan> {
+        let fragments = dataset
+            .get_fragments()
+            .into_iter()
+            .map(|fragment| fragment.metadata().clone())
+            .collect::<Vec<_>>();
+
+        let tasks = if fragments.is_empty() {
+            Vec::new()
+        } else {
+            vec![TaskData { fragments }]
+        };
+
+        Ok(CompactionPlan {
+            tasks,
+            read_version: dataset.version_id().into(),
+            options: self.options.clone(),
+        })
+    }
+}
 
 fn optional_usize(value: Option<i64>, name: &str) -> Result<Option<usize>, String> {
     match value {
@@ -53,6 +85,7 @@ pub fn lance_optimize_impl(
     compaction_mode: Option<&str>,
     max_source_fragments: Option<i64>,
     io_buffer_size: Option<i64>,
+    rewrite_all: bool,
     server_name: Option<&str>,
 ) -> Result<(i64, i64, i64, i64, i64), String> {
     let start = Instant::now();
@@ -78,13 +111,21 @@ pub fn lance_optimize_impl(
     options.max_source_fragments = optional_usize(max_source_fragments, "max_source_fragments")?;
     options.io_buffer_size = optional_u64(io_buffer_size, "io_buffer_size")?;
 
+    if rewrite_all && options.max_source_fragments.is_some() {
+        return Err("rewrite_all cannot be combined with max_source_fragments".to_string());
+    }
+
     let rt = Runtime::new().map_err(|e| format!("failed to create tokio runtime: {}", e))?;
 
     let metrics = rt.block_on(async {
         let mut dataset = open_dataset(uri, server_name).await?;
-        compact_files(&mut dataset, options, None)
-            .await
-            .map_err(|e| format!("lance optimize failed: {}", e))
+        if rewrite_all {
+            let planner = RewriteAllPlanner { options };
+            compact_files_with_planner(&mut dataset, None, &planner).await
+        } else {
+            compact_files(&mut dataset, options, None).await
+        }
+        .map_err(|e| format!("lance optimize failed: {}", e))
     })?;
 
     let duration_ms = start.elapsed().as_millis() as i64;

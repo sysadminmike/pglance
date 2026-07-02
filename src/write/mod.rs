@@ -3,6 +3,7 @@ pub mod append;
 pub mod delete;
 pub mod index;
 pub mod merge_insert;
+pub mod metadata;
 pub mod optimize;
 pub mod pg_to_arrow;
 pub mod storage;

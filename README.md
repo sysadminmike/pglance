@@ -12,6 +12,7 @@
 - Auto schema discovery + DDL: `lance_import(server, schema, table, uri, batch_size => NULL)`
 - Namespace attach/sync: bulk-import entire Lance namespace trees
 - Direct column aggregates: `lance_min()` / `lance_max()` scan one Lance column without the FDW row-conversion path
+- Direct table metadata: `lance_table_info()`, `lance_table_fields()`, `lance_count_rows()`, fragment, version, tag, and branch helpers
 - Native-first type mapping:
   - Scalars map to native PostgreSQL scalar types where possible
   - `list<T>` maps to `T[]` when possible
@@ -126,6 +127,55 @@ This is much faster than a temp `lance_import()` plus `SELECT max(col)` for larg
 datasets. The FDW query has to produce PostgreSQL rows and convert Arrow values
 into PostgreSQL datums before PostgreSQL can aggregate them; the helper projects
 only `column_name` and computes the result directly over Arrow arrays.
+
+#### Inspect Lance table metadata directly
+
+Use the metadata helpers when you need dataset facts without creating a foreign
+table or scanning rows through the FDW.
+
+```sql
+SELECT uri, version, latest_version, rows, fragments
+  FROM lance_table_info('/path/to/customers.lance');
+
+SELECT field_path, field_id, parent_id, data_type, nullable
+  FROM lance_table_fields('/path/to/customers.lance')
+ ORDER BY field_id;
+
+SELECT *
+  FROM lance_count_rows('/path/to/customers.lance', filter := 'updated_at >= timestamp ''2026-01-01''');
+
+SELECT fragment_id, physical_rows, logical_rows, data_files, has_deletions
+  FROM lance_list_fragments('/path/to/customers.lance')
+ ORDER BY fragment_id;
+
+SELECT * FROM lance_fragment_stats('/path/to/customers.lance');
+```
+
+Version and reference helpers expose Lance dataset history and labels:
+
+```sql
+SELECT version, timestamp, metadata
+  FROM lance_list_versions('/path/to/customers.lance')
+ ORDER BY version;
+
+SELECT * FROM lance_list_tags('/path/to/customers.lance');
+SELECT * FROM lance_list_branches('/path/to/customers.lance');
+```
+
+Before deleting old files, inspect what `lance_vacuum()` would remove:
+
+```sql
+SELECT bytes_removed,
+       old_versions,
+       data_files_removed,
+       candidate_files_truncated,
+       candidate_files
+  FROM lance_cleanup_plan(
+    uri                := '/path/to/customers.lance',
+    older_than_seconds := 604800,
+    max_candidate_files := 100
+  );
+```
 
 ### 4) Attach and sync a Lance namespace
 
@@ -428,6 +478,7 @@ SELECT * FROM lance_optimize(
     defer_index_remap         := false,
     compaction_mode           := 'reencode',
     max_source_fragments      := NULL,
+    rewrite_all               := false,
     server_name               := NULL
 );
 --  fragments_removed | fragments_added | files_removed | files_added | duration_ms
@@ -449,9 +500,22 @@ Useful options:
 | `defer_index_remap` | `false` | Defer index remapping during compaction. |
 | `compaction_mode` | `NULL` | One of `reencode`, `try_binary_copy`, or `force_binary_copy`. |
 | `max_source_fragments` | `NULL` | Limit how many source fragments are compacted in one run. |
+| `rewrite_all` | `false` | Rewrite every active fragment instead of only fragments selected by Lance's default compaction planner. Cannot be combined with `max_source_fragments`. |
 | `server_name` | `NULL` | Foreign server to reuse for object-store credentials. |
 
 `lance_optimize()` preserves the current logical rows, but it can create a new dataset version and leave older physical files on disk until vacuum removes them.
+
+To force a full rewrite of the active dataset, use `rewrite_all := true`:
+
+```sql
+SELECT * FROM lance_optimize(
+  uri             := '/path/to/dataset.lance',
+  rewrite_all     := true,
+  compaction_mode := 'reencode'
+);
+```
+
+This schedules all active fragments for rewrite and reports the replaced and newly written fragments/files in the returned metrics.
 
 #### Vacuum old files
 

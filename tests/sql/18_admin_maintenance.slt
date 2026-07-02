@@ -47,6 +47,24 @@ SELECT (fragments_removed >= 0) AS fr_ok,
 ----
 t t t t t
 
+# rewrite_all should force a full data-file rewrite even after normal compaction
+# has already reduced the active dataset to a clean fragment set.
+
+query IIIII
+SELECT (fragments_removed >= 1) AS fr_ok,
+       (fragments_added >= 1) AS fa_ok,
+       (files_removed >= 1) AS files_removed_ok,
+       (files_added >= 1) AS files_added_ok,
+       (duration_ms >= 0) AS time_ok
+  FROM lance_optimize(
+    '${LANCE_WRITE_DIR}/t_admin_maintenance.lance',
+    rewrite_all := true,
+    compaction_mode := 'reencode',
+    io_buffer_size := 1048576
+  );
+----
+t t t t t
+
 # Read-back still sees the same rows after compaction.
 
 statement ok
@@ -105,6 +123,13 @@ t
 query T
 SELECT capture_error(
   'SELECT * FROM lance_optimize(''' || '${LANCE_WRITE_DIR}/t_admin_maintenance.lance' || ''', io_buffer_size := -1)'
+) IS NOT NULL;
+----
+t
+
+query T
+SELECT capture_error(
+  'SELECT * FROM lance_optimize(''' || '${LANCE_WRITE_DIR}/t_admin_maintenance.lance' || ''', rewrite_all := true, max_source_fragments := 1)'
 ) IS NOT NULL;
 ----
 t

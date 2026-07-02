@@ -467,6 +467,336 @@ fn lance_max(
     TableIterator::new(vec![row])
 }
 
+fn parse_jsonb(context: &str, value: &str) -> JsonB {
+    JsonB(
+        serde_json::from_str(value)
+            .unwrap_or_else(|e| pgrx::error!("{} failed to parse JSON output: {}", context, e)),
+    )
+}
+
+#[pg_extern]
+fn lance_table_info(
+    uri: &str,
+    server_name: default!(Option<&str>, "NULL"),
+) -> TableIterator<
+    'static,
+    (
+        name!(uri, String),
+        name!(version, i64),
+        name!(latest_version, i64),
+        name!(rows, i64),
+        name!(fragments, i64),
+        name!(schema, JsonB),
+        name!(metadata, JsonB),
+        name!(duration_ms, i64),
+    ),
+> {
+    let row = write::metadata::lance_table_info_impl(uri, server_name)
+        .unwrap_or_else(|e| pgrx::error!("lance_table_info failed: {}", e));
+    let (uri, version, latest_version, rows, fragments, schema, metadata, duration_ms) = row;
+
+    TableIterator::new(vec![(
+        uri,
+        version,
+        latest_version,
+        rows,
+        fragments,
+        parse_jsonb("lance_table_info", &schema),
+        parse_jsonb("lance_table_info", &metadata),
+        duration_ms,
+    )])
+}
+
+#[pg_extern]
+fn lance_table_fields(
+    uri: &str,
+    server_name: default!(Option<&str>, "NULL"),
+) -> TableIterator<
+    'static,
+    (
+        name!(field_path, String),
+        name!(field_id, i32),
+        name!(parent_id, i32),
+        name!(field_name, String),
+        name!(data_type, String),
+        name!(nullable, bool),
+        name!(metadata, JsonB),
+    ),
+> {
+    let rows = write::metadata::lance_table_fields_impl(uri, server_name)
+        .unwrap_or_else(|e| pgrx::error!("lance_table_fields failed: {}", e))
+        .into_iter()
+        .map(
+            |(field_path, field_id, parent_id, field_name, data_type, nullable, metadata)| {
+                (
+                    field_path,
+                    field_id,
+                    parent_id,
+                    field_name,
+                    data_type,
+                    nullable,
+                    parse_jsonb("lance_table_fields", &metadata),
+                )
+            },
+        )
+        .collect::<Vec<_>>();
+
+    TableIterator::new(rows)
+}
+
+#[pg_extern]
+fn lance_count_rows(
+    uri: &str,
+    filter: default!(Option<&str>, "NULL"),
+    server_name: default!(Option<&str>, "NULL"),
+) -> TableIterator<'static, (name!(rows, i64), name!(duration_ms, i64))> {
+    let row = write::metadata::lance_count_rows_impl(uri, filter, server_name)
+        .unwrap_or_else(|e| pgrx::error!("lance_count_rows failed: {}", e));
+
+    TableIterator::new(vec![row])
+}
+
+#[pg_extern]
+fn lance_list_fragments(
+    uri: &str,
+    server_name: default!(Option<&str>, "NULL"),
+) -> TableIterator<
+    'static,
+    (
+        name!(fragment_id, i64),
+        name!(physical_rows, Option<i64>),
+        name!(logical_rows, Option<i64>),
+        name!(data_files, i64),
+        name!(has_deletions, bool),
+        name!(details, JsonB),
+    ),
+> {
+    let rows = write::metadata::lance_list_fragments_impl(uri, server_name)
+        .unwrap_or_else(|e| pgrx::error!("lance_list_fragments failed: {}", e))
+        .into_iter()
+        .map(
+            |(fragment_id, physical_rows, logical_rows, data_files, has_deletions, details)| {
+                (
+                    fragment_id,
+                    physical_rows,
+                    logical_rows,
+                    data_files,
+                    has_deletions,
+                    parse_jsonb("lance_list_fragments", &details),
+                )
+            },
+        )
+        .collect::<Vec<_>>();
+
+    TableIterator::new(rows)
+}
+
+#[pg_extern]
+fn lance_fragment_stats(
+    uri: &str,
+    server_name: default!(Option<&str>, "NULL"),
+) -> TableIterator<
+    'static,
+    (
+        name!(fragments, i64),
+        name!(physical_rows, i64),
+        name!(logical_rows, i64),
+        name!(deleted_rows, i64),
+        name!(avg_rows_per_fragment, f64),
+        name!(fragments_with_deletions, i64),
+        name!(duration_ms, i64),
+    ),
+> {
+    let row = write::metadata::lance_fragment_stats_impl(uri, server_name)
+        .unwrap_or_else(|e| pgrx::error!("lance_fragment_stats failed: {}", e));
+
+    TableIterator::new(vec![row])
+}
+
+#[pg_extern]
+fn lance_list_versions(
+    uri: &str,
+    server_name: default!(Option<&str>, "NULL"),
+) -> TableIterator<
+    'static,
+    (
+        name!(version, i64),
+        name!(timestamp, String),
+        name!(metadata, JsonB),
+    ),
+> {
+    let rows = write::metadata::lance_list_versions_impl(uri, server_name)
+        .unwrap_or_else(|e| pgrx::error!("lance_list_versions failed: {}", e))
+        .into_iter()
+        .map(|(version, timestamp, metadata)| {
+            (
+                version,
+                timestamp,
+                parse_jsonb("lance_list_versions", &metadata),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    TableIterator::new(rows)
+}
+
+#[pg_extern]
+fn lance_list_tags(
+    uri: &str,
+    server_name: default!(Option<&str>, "NULL"),
+) -> TableIterator<
+    'static,
+    (
+        name!(tag_name, String),
+        name!(branch, Option<String>),
+        name!(version, i64),
+        name!(created_at, Option<String>),
+        name!(updated_at, Option<String>),
+        name!(manifest_size, i64),
+        name!(metadata, JsonB),
+    ),
+> {
+    let rows = write::metadata::lance_list_tags_impl(uri, server_name)
+        .unwrap_or_else(|e| pgrx::error!("lance_list_tags failed: {}", e))
+        .into_iter()
+        .map(
+            |(tag_name, branch, version, created_at, updated_at, manifest_size, metadata)| {
+                (
+                    tag_name,
+                    branch,
+                    version,
+                    created_at,
+                    updated_at,
+                    manifest_size,
+                    parse_jsonb("lance_list_tags", &metadata),
+                )
+            },
+        )
+        .collect::<Vec<_>>();
+
+    TableIterator::new(rows)
+}
+
+#[pg_extern]
+fn lance_list_branches(
+    uri: &str,
+    server_name: default!(Option<&str>, "NULL"),
+) -> TableIterator<
+    'static,
+    (
+        name!(branch_name, String),
+        name!(parent_branch, Option<String>),
+        name!(parent_version, i64),
+        name!(created_at_unix, i64),
+        name!(manifest_size, i64),
+        name!(identifier, JsonB),
+        name!(metadata, JsonB),
+    ),
+> {
+    let rows = write::metadata::lance_list_branches_impl(uri, server_name)
+        .unwrap_or_else(|e| pgrx::error!("lance_list_branches failed: {}", e))
+        .into_iter()
+        .map(
+            |(
+                branch_name,
+                parent_branch,
+                parent_version,
+                created_at_unix,
+                manifest_size,
+                identifier,
+                metadata,
+            )| {
+                (
+                    branch_name,
+                    parent_branch,
+                    parent_version,
+                    created_at_unix,
+                    manifest_size,
+                    parse_jsonb("lance_list_branches", &identifier),
+                    parse_jsonb("lance_list_branches", &metadata),
+                )
+            },
+        )
+        .collect::<Vec<_>>();
+
+    TableIterator::new(rows)
+}
+
+#[pg_extern]
+#[allow(clippy::too_many_arguments)]
+fn lance_cleanup_plan(
+    uri: &str,
+    older_than_seconds: default!(Option<i64>, "604800"),
+    before_version: default!(Option<i64>, "NULL"),
+    delete_unverified: default!(bool, "false"),
+    error_if_tagged_old_versions: default!(bool, "false"),
+    clean_referenced_branches: default!(bool, "false"),
+    delete_rate_limit: default!(Option<i64>, "NULL"),
+    max_candidate_files: default!(Option<i64>, "1000"),
+    server_name: default!(Option<&str>, "NULL"),
+) -> TableIterator<
+    'static,
+    (
+        name!(read_version, i64),
+        name!(bytes_removed, i64),
+        name!(old_versions, i64),
+        name!(data_files_removed, i64),
+        name!(transaction_files_removed, i64),
+        name!(index_files_removed, i64),
+        name!(deletion_files_removed, i64),
+        name!(candidate_files_truncated, bool),
+        name!(candidate_file_limit, i64),
+        name!(candidate_files, JsonB),
+        name!(referenced_branches, JsonB),
+        name!(warnings, JsonB),
+        name!(duration_ms, i64),
+    ),
+> {
+    let row = write::metadata::lance_cleanup_plan_impl(
+        uri,
+        older_than_seconds,
+        before_version,
+        delete_unverified,
+        error_if_tagged_old_versions,
+        clean_referenced_branches,
+        delete_rate_limit,
+        max_candidate_files,
+        server_name,
+    )
+    .unwrap_or_else(|e| pgrx::error!("lance_cleanup_plan failed: {}", e));
+    let (
+        read_version,
+        bytes_removed,
+        old_versions,
+        data_files_removed,
+        transaction_files_removed,
+        index_files_removed,
+        deletion_files_removed,
+        candidate_files_truncated,
+        candidate_file_limit,
+        candidate_files,
+        referenced_branches,
+        warnings,
+        duration_ms,
+    ) = row;
+
+    TableIterator::new(vec![(
+        read_version,
+        bytes_removed,
+        old_versions,
+        data_files_removed,
+        transaction_files_removed,
+        index_files_removed,
+        deletion_files_removed,
+        candidate_files_truncated,
+        candidate_file_limit,
+        parse_jsonb("lance_cleanup_plan", &candidate_files),
+        parse_jsonb("lance_cleanup_plan", &referenced_branches),
+        parse_jsonb("lance_cleanup_plan", &warnings),
+        duration_ms,
+    )])
+}
+
 #[pg_extern]
 fn lance_create_scalar_index(
     uri: &str,
@@ -689,6 +1019,7 @@ fn lance_optimize(
     compaction_mode: default!(Option<&str>, "NULL"),
     max_source_fragments: default!(Option<i64>, "NULL"),
     io_buffer_size: default!(Option<i64>, "NULL"),
+    rewrite_all: default!(bool, "false"),
     server_name: default!(Option<&str>, "NULL"),
 ) -> TableIterator<
     'static,
@@ -714,6 +1045,7 @@ fn lance_optimize(
             compaction_mode,
             max_source_fragments,
             io_buffer_size,
+            rewrite_all,
             server_name,
         )
         .unwrap_or_else(|e| pgrx::error!("lance_optimize failed: {}", e));
